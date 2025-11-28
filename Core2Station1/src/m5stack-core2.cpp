@@ -51,7 +51,7 @@ const char* CAPTIVE_HTML = R"raw(
 
 // --- CORE FUNCTIONS ---
 
-// 7a. Core2 ส่งข้อมูล Username ที่ได้รับมาไปยัง StickC-Plus2 ผ่าน Fixed IP
+// Core2 ส่งข้อมูล Username ที่ได้รับมาไปยัง StickC-Plus2 ผ่าน Fixed IP
 void sendUsernameToStickC(String username) {
     HTTPClient http;
     String url = "http://" + String(STICKC_IP) + ":" + String(STICKC_PORT) + "/set_username"; 
@@ -96,7 +96,7 @@ void setup() {
     M5.begin(cfg);
     M5.Lcd.setRotation(1); 
 
-    // 0b. Core2 สร้าง WiFi Access Point (SoftAP mode)
+    // Core2 สร้าง WiFi Access Point (SoftAP mode)
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(localIP, gateway, subnet);
     WiFi.softAP(SSID, PASSWORD);
@@ -114,13 +114,13 @@ void setup() {
 
     // --- WEB SERVER HANDLERS ---
     
-    // C1. Redirect Handlers (บังคับให้ Pop-up ขึ้นบน iOS/Android)
+    // Redirect Handlers (บังคับให้ Pop-up ขึ้นบน iOS/Android)
     server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
         // iOS/Android ใช้หน้านี้: Redirect ไปหน้าหลัก
         request->redirect("http://" + WiFi.softAPIP().toString() + "/");
     });
     
-    // C2. Redirect Handlers (สำหรับ Windows)
+    // Redirect Handlers (สำหรับ Windows)
     server.on("/fwlink", HTTP_GET, [](AsyncWebServerRequest *request) {
         // Windows ใช้หน้านี้: Redirect ไปหน้าหลัก
         request->redirect("http://" + WiFi.softAPIP().toString() + "/");

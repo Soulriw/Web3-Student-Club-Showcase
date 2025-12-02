@@ -138,13 +138,13 @@ void defaultSelectButton(int choice) {
     // choice_canvas.pushCanvas(0, yRect, UPDATE_MODE_DU4);
 }
 
-bool sendReceiveCoin(String coin) {
+bool sendReceiveCoin(String coin_value) {
     HTTPClient http;
-
-    String url = "http://" + String(stickc_ip) + ":" + String(port) + "/add_coin";
+    String url = "http://" + String(stickc_ip) + ":" + String(port) + "/set_coins";
     http.begin(url);
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    String postData = "value=" + coin;
+
+    String postData = "coins=" + coin_value; 
 
     int code = http.POST(postData);
     String response = http.getString();
@@ -153,7 +153,7 @@ bool sendReceiveCoin(String coin) {
         Serial.println("Sent OK");
         return true;
     }
-    Serial.println(String(code) + " Error: " +  response);
+    Serial.println(String(code) + " Error: " + response);
     return false;
 }
 

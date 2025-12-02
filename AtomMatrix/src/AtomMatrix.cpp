@@ -12,11 +12,9 @@
 const char *SSID = "Web3Showcase_AP";
 const char *PASSWORD = "12345678";
 
-// ⚠️ ใส่ IP ของ StickC (ดูจากหน้าจอ Core2)
 const char* STICKC_IP = "192.168.4.2"; 
 const int STICKC_PORT = 88;
 
-// ⚠️ ใส่ MAC Address ของ Atom Echo
 uint8_t echoAddress[] = {0x90, 0x15, 0x06, 0xFD, 0xF2, 0xF8}; 
 
 const int RSSI_THRESHOLD = -55;
@@ -50,7 +48,6 @@ void sendAuthStartToStickC() {
     }
 }
 
-// 🚨 FIX 1: แก้ไข Signature ของ Callback ให้เป็นแบบเก่า (รับ const uint8_t * mac)
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
     if (len > 0 && *incomingData == 2) {
         isVerified = true;
@@ -79,7 +76,6 @@ void setup() {
         Serial.println("Error initializing ESP-NOW");
         return;
     }
-    // 🚨 FIX 2: Register Callback
     esp_now_register_recv_cb(OnDataRecv);
 
     // Register Echo Peer
@@ -113,7 +109,6 @@ void loop() {
         while(true) { delay(1000); } 
     }
 
-    // 🚨 FIX 3: แก้ไข BLEScanResults ไม่ใช่ Pointer (*)
     BLEScanResults foundDevices = pBLEScan->start(1, false); 
     bool foundTarget = false;
     

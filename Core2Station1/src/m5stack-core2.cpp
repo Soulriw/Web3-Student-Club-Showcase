@@ -2,198 +2,200 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <qrcode.h>
+#include "qrcode.h"
 #include <HTTPClient.h>
 #include <DNSServer.h>
+#include <esp_wifi.h> 
 
 // --- CONFIGURATION ---
 const char *SSID = "Web3Showcase_AP";
-const char *PASSWORD = "12345678";
-const char* STICKC_IP = "192.168.4.20"; 
-const int STICKC_PORT = 88;
+const char *PASSWORD = NULL; // รหัสผ่าน
 
-IPAddress localIP(192, 168, 4, 1);
-IPAddress gateway(192, 168, 4, 1);
-IPAddress subnet(255, 255, 255, 0);
+// Fixed IP Config
+const IPAddress localIP(192, 168, 4, 1);
+const IPAddress gateway(192, 168, 4, 1);
+const IPAddress subnet(255, 255, 255, 0);
 
-// สร้างตัวแปร String สำหรับ URL ของ IP เพื่อใช้ในโค้ดใหม่
-String localIPURL = "http://192.168.4.1";
+// Target StickC
+const String STICKC_URL = "http://192.168.4.2:80/set_username"; 
 
+// --- OBJECTS ---
 AsyncWebServer server(80);
 DNSServer dnsServer;
-const byte DNS_PORT = 53;
+QRCode qrcode;
 
-String penningUsername = "";
-bool hasNewUserName = false;
+// --- STATE ---
+String registeredUser = "";
+bool isSuccessScreen = false;
+unsigned long successTimer = 0;
 
-// --- HTML (เปลี่ยนชื่อตัวแปรเป็น index_html ตามโค้ดใหม่) ---
-const char* index_html = R"raw(
+// --- HTML ---
+const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web3 Student Club Identity</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
-        input[type=text], button { padding: 10px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; width: 80%; max-width: 300px; }
-        button { background-color: #4CAF50; color: white; cursor: pointer; }
-    </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web3 Student Club</title>
+  <style>
+    body { font-family: sans-serif; background: #1a1a2e; color: #fff; text-align: center; padding: 20px; }
+    .card { background: #16213e; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+    input { width: 100%; padding: 15px; margin: 15px 0; border-radius: 5px; border: none; font-size: 16px; }
+    button { background: #4361ee; color: white; padding: 15px; border: none; border-radius: 5px; width: 100%; font-size: 18px; font-weight: bold; }
+  </style>
 </head>
 <body>
-    <h1>STATION 1: Identity Creation</h1>
-    <form action="/submit" method="POST">
-        <label for="username">Enter Your Username:</label><br>
-        <input type="text" id="username" name="username" placeholder="Username (e.g. Satoshi_N)" required><br>
-        <button type="submit">Submit</button>
+  <div class="card">
+    <h2>🎯 Station 1</h2>
+    <p>Create Identity</p>
+    <form action="/register" method="POST">
+      <input type="text" name="username" placeholder="Enter Username" required>
+      <button type="submit">REGISTER</button>
     </form>
+  </div>
 </body>
 </html>
-)raw";
+)rawliteral";
 
-// --- CORE FUNCTIONS ---
+// --- UI FUNCTIONS ---
+void drawQRCode() {
+    isSuccessScreen = false;
+    M5.Display.fillScreen(BLACK);
+    
+    String qrData = "WIFI:S:" + String(SSID) + ";T:WPA;P:" + String(PASSWORD) + ";;";
+    
+    uint8_t qrcodeData[qrcode_getBufferSize(3)];
+    qrcode_initText(&qrcode, qrcodeData, 3, 0, qrData.c_str());
+    
+    int scale = 4;
+    int offsetX = (320 - (qrcode.size * scale)) / 2;
+    int offsetY = (240 - (qrcode.size * scale)) / 2 - 20;
 
-void sendUsernameToStickC(String username) {
-    HTTPClient http;
-    String url = "http://" + String(STICKC_IP) + ":" + String(STICKC_PORT) + "/set_username"; 
+    M5.Display.fillRect(offsetX - 5, offsetY - 5, (qrcode.size * scale) + 10, (qrcode.size * scale) + 10, WHITE);
 
-    http.begin(url);
-    http.setConnectTimeout(2000); // Timeout 2 วินาที กันค้าง
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    String postData = "username=" + username;
-
-    int httpResponseCode = http.POST(postData);
-
-    M5.Lcd.setCursor(5, 100);
-    if (httpResponseCode > 0) {
-        M5.Lcd.printf("Sent to StickC (Code: %d) ", httpResponseCode);
-    } else {
-        M5.Lcd.printf("StickC Request Failed (Error: %s)", http.errorToString(httpResponseCode).c_str());
+    for (uint8_t y = 0; y < qrcode.size; y++) {
+        for (uint8_t x = 0; x < qrcode.size; x++) {
+            if (qrcode_getModule(&qrcode, x, y)) {
+                M5.Display.fillRect(x * scale + offsetX, y * scale + offsetY, scale, scale, BLACK);
+            }
+        }
     }
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(CYAN);
+    M5.Display.drawCenterString("Scan to Register", 160, 215);
+}
+
+void drawSuccess(String user) {
+    isSuccessScreen = true;
+    successTimer = millis();
+    M5.Display.fillScreen(BLACK);
+    M5.Display.setTextColor(GREEN);
+    M5.Display.setTextSize(3);
+    M5.Display.drawCenterString("SUCCESS!", 160, 60);
+    M5.Display.setTextColor(YELLOW);
+    M5.Display.drawCenterString(user, 160, 140);
+    M5.Display.setTextColor(WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.drawCenterString("Check StickC", 160, 200);
+}
+
+bool sendToStickC(String user) {
+    HTTPClient http;
+    http.begin(STICKC_URL);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    http.setConnectTimeout(2000); 
+    String postData = "username=" + user;
+    int httpCode = http.POST(postData);
     http.end();
+    return (httpCode == 200);
 }
 
-void displayQRCode(const char* data) {
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setTextDatum(top_center);
-    M5.Lcd.setTextColor(WHITE);
-    M5.Lcd.setFont(&fonts::Font4); 
-    M5.Lcd.drawString("1. Connect to Wi-Fi", M5.Lcd.width() / 2, 10); 
-
-    int size = 180;
-    int x = (M5.Lcd.width() - size) / 2;
-    int y = 50;
+// --- SETUP ---
+void setup() {
+    auto cfg = M5.config();
+    M5.begin(cfg);
+    M5.Display.setRotation(1);
+    Serial.begin(115200);
     
-    M5.Lcd.qrcode(data, x, y, size);
+    // ----------------------------------------------------
+    // 🛠️ 1. ANDROID CONNECTION FIX (ลำดับสำคัญมาก)
+    // ----------------------------------------------------
+    WiFi.mode(WIFI_AP);
     
-    M5.Lcd.setTextDatum(top_left);
-    M5.Lcd.setCursor(5, 240);
-    M5.Lcd.setFont(&fonts::Font2);
-    M5.Lcd.print("2. Enter Username in Browser");
-}
+    // สั่งปิด WiFi ก่อนเพื่อแก้ Config
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    
+    // โหลด Config ใหม่และปิด AMPDU RX (ตัวปัญหาของ Android)
+    wifi_init_config_t my_config = WIFI_INIT_CONFIG_DEFAULT();
+    my_config.ampdu_rx_enable = false; 
+    esp_wifi_init(&my_config);
+    esp_wifi_start();
+    delay(100);
 
-// --- SETUP SERVER FUNCTION (รวมโค้ดใหม่ที่นี่) ---
-void setUpWebserver() {
-    // 1. Required Handlers (Windows 11 & PAD Fixes)
-    server.on("/connecttest.txt", [](AsyncWebServerRequest *request) { request->redirect("http://logout.net"); }); 
-    server.on("/wpad.dat", [](AsyncWebServerRequest *request) { request->send(404); }); 
+    // เริ่มสร้าง AP *หลังจาก* แก้ Config แล้วเท่านั้น
+    WiFi.softAPConfig(localIP, gateway, subnet);
+    WiFi.softAP(SSID, PASSWORD);
+    
+    Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
+    // ----------------------------------------------------
 
-    // 2. Android Specific (แก้ตรงนี้: ส่งหน้าเว็บ index_html สวนกลับไปเลย ไม่ต้อง redirect)
-    // Android รุ่นใหม่
-    server.on("/generate_204", [](AsyncWebServerRequest *request) { 
-        AsyncWebServerResponse *response = request->beginResponse(200, "text/html", index_html);
-        response->addHeader("Cache-Control", "public,max-age=31536000");
-        request->send(response);
-    });
-    // Android รุ่นเก่า
-    server.on("/gen_204", [](AsyncWebServerRequest *request) { 
-        AsyncWebServerResponse *response = request->beginResponse(200, "text/html", index_html);
-        response->addHeader("Cache-Control", "public,max-age=31536000");
-        request->send(response);
-    });
+    // 2. DNS Server (Captive Portal หัวใจหลัก)
+    // ดักจับทุก Domain (*) ให้ชี้มาที่ IP เรา
+    dnsServer.setTTL(300);
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer.start(53, "*", localIP);
 
-    // 3. Background responses (Microsoft, Apple, Firefox) - พวกนี้ Redirect เหมือนเดิมดีแล้ว
-    server.on("/redirect", [](AsyncWebServerRequest *request) { request->redirect(localIPURL); });          // Microsoft
-    server.on("/hotspot-detect.html", [](AsyncWebServerRequest *request) { request->redirect(localIPURL); }); // Apple
-    server.on("/canonical.html", [](AsyncWebServerRequest *request) { request->redirect(localIPURL); });    // Firefox
-    server.on("/success.txt", [](AsyncWebServerRequest *request) { request->send(200); });                  // Firefox
-    server.on("/ncsi.txt", [](AsyncWebServerRequest *request) { request->redirect(localIPURL); });          // Windows
-
-    // 4. Favicon 
-    server.on("/favicon.ico", [](AsyncWebServerRequest *request) { request->send(404); });
-
-    // 5. Serve Basic HTML Page (Root)
-    server.on("/", HTTP_ANY, [](AsyncWebServerRequest *request) {
-        AsyncWebServerResponse *response = request->beginResponse(200, "text/html", index_html);
-        response->addHeader("Cache-Control", "public,max-age=31536000");
-        request->send(response);
-        Serial.println("Served Basic HTML Page");
+    // 3. Routes for Captive Portal (ดักทุกทาง)
+    // Android Check
+    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *r){ r->redirect("http://192.168.4.1/"); });
+    server.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *r){ r->redirect("http://192.168.4.1/"); });
+    // Windows Check
+    server.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *r){ r->redirect("http://192.168.4.1/"); });
+    server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *r){ r->redirect("http://logout.net"); });
+    // Apple Check
+    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *r){ r->redirect("http://192.168.4.1/"); });
+    
+    // Catch-All: ถ้าหาอะไรไม่เจอ ให้เด้งเข้าหน้าแรกเราให้หมด
+    server.onNotFound([](AsyncWebServerRequest *request){
+        request->redirect("http://192.168.4.1/");
     });
 
-    // 6. Handle Form Submission
-    server.on("/submit", HTTP_POST, [](AsyncWebServerRequest *request){
+    // Main Page
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send_P(200, "text/html", index_html);
+    });
+
+    // Register Handler
+    server.on("/register", HTTP_POST, [](AsyncWebServerRequest *request){
         if (request->hasParam("username", true)) {
-            String username = request->getParam("username", true)->value();
-            penningUsername = username;
-            hasNewUserName = true;
-            M5.Lcd.fillScreen(BLACK);
-            M5.Lcd.setTextDatum(top_left);
-            M5.Lcd.setFont(&fonts::Font2);
-            M5.Lcd.printf("Username: %s", username.c_str());
-            request->send(200, "text/plain", "Success! Check the StickC.");
+            String user = request->getParam("username", true)->value();
+            bool success = sendToStickC(user);
+            
+            String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'><style>body{background:#1a1a2e;color:white;text-align:center;font-family:sans-serif;padding:50px;}</style></head><body>";
+            if(success) {
+                html += "<h1 style='color:#00ff00;font-size:60px'>✅</h1><h2>Success!</h2><p>ID: <b>" + user + "</b></p>";
+                drawSuccess(user);
+            } else {
+                html += "<h1 style='color:red;font-size:60px'>⚠️</h1><h2>Connection Error</h2><p>StickC not found</p><button onclick='history.back()'>Retry</button>";
+            }
+            html += "</body></html>";
+            request->send(200, "text/html", html);
         } else {
             request->send(400, "text/plain", "Missing Username");
         }
     });
 
-    // 7. Catch All (onNotFound) - ส่งหน้าเว็บสวนไปเลยเช่นกัน
-    server.onNotFound([](AsyncWebServerRequest *request) {
-        AsyncWebServerResponse *response = request->beginResponse(200, "text/html", index_html);
-        request->send(response); // ไม่ Redirect แล้ว ส่งหน้าเว็บใส่เลย
-        Serial.print("Caught: ");
-        Serial.println(request->url());
-    });
-
     server.begin();
-    M5.Lcd.println("\nHTTP Server Started.");
-}
-
-void setup() {
-    auto cfg = M5.config();
-    M5.begin(cfg);
-    M5.Lcd.setRotation(1); 
-    Serial.begin(115200); // เริ่มต้น Serial เพื่อดู Debug จากโค้ดใหม่
-
-    // WiFi Setup
-    WiFi.mode(WIFI_AP);
-    WiFi.softAPConfig(localIP, gateway, subnet);
-    WiFi.softAP(SSID, PASSWORD);
-    
-    // Display Info
-    M5.Lcd.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
-    M5.Lcd.printf("AP MAC: %s\n", WiFi.softAPmacAddress().c_str());
-
-    // QR Code
-    String qrData = "WIFI:S:" + String(SSID) + ";T:WPA;P:" + String(PASSWORD) + ";;";
-    displayQRCode(qrData.c_str());
-
-    // DNS Server
-    dnsServer.start(DNS_PORT, "*", localIP);
-
-    // เริ่มต้น Webserver ด้วยฟังก์ชันใหม่
-    setUpWebserver();
+    drawQRCode();
 }
 
 void loop() {
+    M5.update();
+    // สำคัญ: ต้องเรียกตลอดเวลาเพื่อให้มือถือรู้ว่าต้องเด้งหน้าเว็บ
     dnsServer.processNextRequest();
 
-    if(hasNewUserName){
-        sendUsernameToStickC(penningUsername);
-        hasNewUserName = false;
-        // หลังจากส่งเสร็จ อาจจะให้กลับมาหน้า QR Code หรือหน้า Info ก็ได้
-        delay(2000);
-        String qrData = "WIFI:S:" + String(SSID) + ";T:WPA;P:" + String(PASSWORD) + ";;";
-        displayQRCode(qrData.c_str());
+    // Reset หน้าจอกลับเป็น QR Code หลังจาก 5 วินาที
+    if (isSuccessScreen && (millis() - successTimer > 5000)) {
+        drawQRCode();
     }
-    M5.update();
 }

@@ -1,217 +1,113 @@
-#include <M5Unified.h>
-#include <esp_now.h>
+#include <M5Atom.h>
 #include <WiFi.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include "../include/ShowcaseProtocol.h"
+#include <HTTPClient.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include "config.h"
 
-// ============================================
-// CONFIGURATION
-// ============================================
-#define LED_READY_COLOR 0x0000FF    // Blue
-#define LED_PROCESSING_COLOR 0xFFFF00  // Yellow
-#define LED_SUCCESS_COLOR 0x00FF00  // Green
-#define LED_ERROR_COLOR 0xFF0000    // Red
-#define LED_OFF 0x000000
+AsyncWebServer server(80);
+bool isTxInProgress = false;
 
-#define TOUCH_THRESHOLD -2000  // Capacitive touch threshold
+void showColor(uint32_t color) {
+    for (int i = 0; i < 25; i++) M5.dis.drawpix(i, color);
+}
 
-// ============================================
-// GLOBAL STATE
-// ============================================
-struct {
-    bool orderPending;
-    bool orderConfirmed;
-    bool userNearby;
-    uint32_t lastOrderTime;
-    uint32_t lastTouchTime;
-} g_matrix4 = {
-    false, false, false, 0, 0
-};
+// 1. เริ่มต้น: เมื่อผู้ใช้กดปุ่ม Atom Matrix
+void initiatePayment() {
+    if (isTxInProgress) return;
+    isTxInProgress = true;
+    
+    Serial.println("Tap-to-Pay: Requesting Order from Paper...");
+    showColor(0x0000FF); // สีน้ำเงิน (Connecting)
 
-// ============================================
-// LED CONTROL
-// ============================================
-void setMatrixColor(uint32_t color) {
-    // M5Unified uses drawPixel for LED matrix on ATOM devices
-    for (int i = 0; i < 25; i++) {
-        M5.Lcd.drawPixel(i % 5, i / 5, color);
+    // ส่ง Request ไปถาม M5-Paper ว่าเลือกเมนูอะไรอยู่
+    HTTPClient http;
+    http.setTimeout(2000);
+    http.begin("http://" + IP_PAPER_S4.toString() + ENDPOINT_GET_ORDER);
+    
+    // M5-Paper ควรตอบกลับมาที่ Endpoint /send_order ของเรา หรือ Return JSON กลับมาเลย
+    // ในที่นี้เราจะให้ M5-Paper ส่งข้อมูลกลับมาที่ Endpoint ของเรา (Callback pattern)
+    int code = http.POST("{}"); 
+    http.end();
+
+    if (code != 200) {
+        Serial.println("Failed to reach Paper");
+        showColor(0xFF0000); // แดง (Error)
+        delay(1000);
+        showColor(0x000000);
+        isTxInProgress = false;
     }
 }
 
-void pulseMatrix(uint32_t color, int pulses) {
-    for (int p = 0; p < pulses; p++) {
-        setMatrixColor(color);
-        delay(200);
-        setMatrixColor(LED_OFF);
-        delay(200);
-    }
-    setMatrixColor(color);
-}
+// 2. รับข้อมูล Order จาก M5-Paper
+void handleReceiveOrder(AsyncWebServerRequest *request) {
+    if (request->hasParam("amount", true) && request->hasParam("item", true)) {
+        String item = request->getParam("item", true)->value();
+        int amount = request->getParam("amount", true)->value().toInt();
+        
+        Serial.printf("Order Received: %s (%d Coin)\n", item.c_str(), amount);
+        
+        // 3. ส่งคำสั่งตัดเงินไปที่ StickC
+        HTTPClient http;
+        String postData = "amount=" + String(amount) + "&item=" + item;
+        
+        http.begin("http://" + IP_STICKC.toString() + ENDPOINT_SPEND_COIN);
+        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+        int code = http.POST(postData);
+        http.end();
 
-// ============================================
-// ESP-NOW COMMUNICATION
-// ============================================
-void sendOrderConfirmationToPaper() {
-    if (!g_matrix4.orderPending) return;
+        if (code == 200) {
+            // สำเร็จ
+            showColor(0x00FF00); // เขียว
+            
+            // สั่งเล่นเสียง Ping
+            http.begin("http://" + IP_ATOM_ECHO.toString() + ENDPOINT_PLAY_TX);
+            http.POST("{}");
+            http.end();
+        } else {
+            // เงินไม่พอ หรือ Error
+            showColor(0xFF0000); // แดง
+        }
 
-    ShowcaseMessage msg = createMessage(MSG_SPEND_CONFIRM, "", 0, "");
-    msg.status = 1;  // Success
-
-    esp_err_t result = esp_now_send(BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
-
-    if (result == ESP_OK) {
-        Serial.println("[OK] Order confirmation sent");
-        g_matrix4.orderConfirmed = true;
-        pulseMatrix(LED_SUCCESS_COLOR, 3);
+        request->send(200, "text/plain", "OK");
+        
+        delay(2000);
+        showColor(0x000000);
+        isTxInProgress = false;
     } else {
-        Serial.println("[ERROR] Failed to send confirmation");
-        pulseMatrix(LED_ERROR_COLOR, 2);
-    }
-
-    g_matrix4.orderPending = false;
-    g_matrix4.lastOrderTime = millis();
-}
-
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-    if (len != sizeof(ShowcaseMessage)) return;
-
-    ShowcaseMessage msg;
-    memcpy(&msg, incomingData, sizeof(msg));
-
-    if (!verifyChecksum(msg)) {
-        Serial.println("[WARN] Checksum verification failed");
-        return;
-    }
-
-    switch (msg.type) {
-        case MSG_SPEND_REQUEST:
-            Serial.printf("[INFO] Order received: %s (-%" PRId32 ")\n", msg.description, msg.amount);
-            g_matrix4.orderPending = true;
-            setMatrixColor(LED_PROCESSING_COLOR);
-            // Wait for user tap
-            break;
-
-        case MSG_RESET_ALL:
-            g_matrix4.orderPending = false;
-            g_matrix4.orderConfirmed = false;
-            setMatrixColor(LED_OFF);
-            Serial.println("[OK] System reset");
-            break;
-
-        default:
-            break;
+        request->send(400);
+        isTxInProgress = false;
     }
 }
 
-// ============================================
-// FREERTOS TASKS
-// ============================================
-
-void taskProximityMonitor(void *parameter) {
-    TickType_t lastWakeTime = xTaskGetTickCount();
-    const TickType_t interval = pdMS_TO_TICKS(500);
-
-    while (1) {
-        // Proximity detection via capacitive touch
-        // If user is nearby, show blue ready state
-        if (!g_matrix4.orderPending && !g_matrix4.orderConfirmed) {
-            setMatrixColor(LED_READY_COLOR);
-        }
-
-        vTaskDelayUntil(&lastWakeTime, interval);
-    }
-}
-
-void taskTimeoutHandler(void *parameter) {
-    TickType_t lastWakeTime = xTaskGetTickCount();
-    const TickType_t interval = pdMS_TO_TICKS(1000);
-
-    while (1) {
-        // Reset confirmed state after 5 seconds
-        if (g_matrix4.orderConfirmed &&
-            (millis() - g_matrix4.lastOrderTime) > 5000) {
-            g_matrix4.orderConfirmed = false;
-            setMatrixColor(LED_READY_COLOR);
-        }
-
-        vTaskDelayUntil(&lastWakeTime, interval);
-    }
-}
-
-// ============================================
-// SETUP
-// ============================================
 void setup() {
-    M5.begin();
-    Serial.begin(115200);
-    delay(500);
-
-    Serial.println("\n\n=== STATION 4: ATOM MATRIX STARTING ===");
-
-    // Initialize LED
-    setMatrixColor(LED_READY_COLOR);
-
-    // Initialize WiFi
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false);
-    delay(100);
-
-    // Initialize ESP-NOW
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[ERROR] ESP-NOW initialization failed");
-        setMatrixColor(LED_ERROR_COLOR);
-        while (1) delay(1000);
+    M5.begin(true, false, true);
+    WiFi.begin(AP_SSID, AP_PASSWORD);
+    
+    while (WiFi.status() != WL_CONNECTED) {
+        M5.dis.drawpix(0, 0xFF0000); delay(200);
+        M5.dis.drawpix(0, 0x000000); delay(200);
     }
+    
+    WiFi.config(IP_ATOM_MATRIX_S4, IP_STATION1_AP, NETMASK, IP_STATION1_AP);
+    M5.dis.drawpix(0, 0x00FF00); delay(1000); showColor(0x000000);
 
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, BROADCAST_MAC, 6);
-    peerInfo.channel = BROADCAST_CHANNEL;
-    peerInfo.encrypt = false;
-    esp_now_add_peer(&peerInfo);
+    // Endpoint รอรับข้อมูล Order จาก M5-Paper
+    server.on(ENDPOINT_SEND_ORDER, HTTP_POST, handleReceiveOrder);
+    
+    server.on(ENDPOINT_HEARTBEAT, HTTP_GET, [](AsyncWebServerRequest *r){ r->send(200); });
+    server.on(ENDPOINT_RESET_GLOBAL, HTTP_POST, [](AsyncWebServerRequest *r){
+        showColor(0x000000);
+        isTxInProgress = false;
+        r->send(200);
+    });
 
-    esp_now_register_recv_cb(onDataRecv);
-
-    Serial.println("[OK] ESP-NOW initialized");
-
-    // Create FreeRTOS tasks
-    xTaskCreatePinnedToCore(
-        taskProximityMonitor,
-        "ProximityTask",
-        2048,
-        NULL,
-        1,
-        NULL,
-        0
-    );
-
-    xTaskCreatePinnedToCore(
-        taskTimeoutHandler,
-        "TimeoutTask",
-        2048,
-        NULL,
-        1,
-        NULL,
-        1
-    );
-
-    Serial.println("[OK] FreeRTOS tasks created");
-    Serial.println("=== STATION 4 MATRIX READY ===\n");
+    server.begin();
 }
 
-// ============================================
-// MAIN LOOP
-// ============================================
 void loop() {
     M5.update();
-
-    // Button press - confirm order
-    if (M5.BtnA.wasPressed()) {
-        if (g_matrix4.orderPending) {
-            Serial.println("[INFO] Button pressed - confirming order");
-            sendOrderConfirmationToPaper();
-        }
+    if (M5.Btn.wasPressed()) {
+        initiatePayment();
     }
-
-    delay(100);
 }

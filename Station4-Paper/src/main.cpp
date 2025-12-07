@@ -1,338 +1,150 @@
-#include <Arduino.h>
-#include <M5Unified.h>
-#include <esp_now.h>
+// Station4_Paper.cpp: โค้ดสำหรับ M5-Paper (Menu Display/Spend Tokens)
+// จัดการ E-Ink Display, Touch Input, และส่ง Order Info กลับไปยัง Atom Matrix
+
+#include <M5EPD.h>
 #include <WiFi.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include "../include/ShowcaseProtocol.h"
+#include <ESPAsyncWebServer.h>
+#include <HTTPClient.h>
+#include "config.h"
 
-// ============================================
-// CONFIGURATION
-// ============================================
-#define PAPER_WIDTH 960
-#define PAPER_HEIGHT 540
-#define MENU_COUNT 6
+AsyncWebServer server(80);
 
-// ============================================
-// MENU DEFINITIONS (Food/Rewards)
-// ============================================
-struct MenuItem {
-    const char *name;
-    int32_t cost;
-    const char *emoji;
+// ข้อมูลเมนู
+struct Menu {
+    String name;
+    int coin;
 };
 
-MenuItem menuItems[MENU_COUNT] = {
-    {"Iced Coffee", 80, "☕"},
-    {"Pizza Slice", 120, "🍕"},
-    {"Ice Cream", 60, "🍦"},
-    {"Premium Gift", 200, "🎁"},
-    {"Movie Ticket", 150, "🎬"},
-    {"Snack Pack", 40, "🍿"}
+Menu menuList[] = {
+    {"Coffee", 2},
+    {"Croissant", 3},
+    {"Lunch Set", 5},
+    {"Tea", 2}
 };
+const int NUM_MENU = 4;
 
-// ============================================
-// GLOBAL STATE
-// ============================================
-struct {
-    String currentUsername;
-    int32_t balance;
-    int selectedMenuIdx;
-    bool orderInProgress;
-    String lastOrderStatus;
-    uint32_t lastUpdateTime;
-} g_paper4 = {
-    "Guest",
-    0,
-    -1,
-    false,
-    "Ready",
-    0
-};
+int selectedMenuIndex = -1;
 
-// ============================================
-// FORWARD DECLARATIONS
-// ============================================
-void submitOrder();
+// ตำแหน่งของปุ่มและข้อความ (ค่าประมาณ)
+const int START_Y_MENU = 100;
+const int ROW_HEIGHT_MENU = 50;
 
-// ============================================
-// UI DRAWING
-// ============================================
-void drawUI() {
-    M5.Lcd.fillScreen(TFT_WHITE);
+// --- ฟังก์ชันช่วยเหลือด้าน UI (E-Ink) ---
+void drawMenuDashboard(m5epd_update_mode_t mode = UPDATE_MODE_GC16) {
+    M5.EPD.WriteFullWindow(M5EPD_RECT_WINDOW_W, M5EPD_RECT_WINDOW_H, mode); // clear display
 
-    // ===== HEADER =====
-    M5.Lcd.setTextSize(3);
-    M5.Lcd.setTextColor(TFT_BLACK);
-    M5.Lcd.drawString("STATION 4: Spend Tokens", 50, 30);
+    M5.EPD.SetFont(&AsciiFont8);
+    M5.EPD.SetTextColor(0x0000, 0xFFFF); // Black text on White background
 
-    // ===== USER INFO =====
-    char userBuf[128];
-    snprintf(userBuf, sizeof(userBuf), "User: %s | Balance: %d coins",
-             g_paper4.currentUsername.c_str(), g_paper4.balance);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.drawString(userBuf, 50, 90);
+    // Title
+    M5.EPD.DrawString("4. Spend Tokens", 50, 20);
+    M5.EPD.DrawString("CAMT WEB3 CAFE", 50, 60);
 
-    // ===== MENU TITLE =====
-    M5.Lcd.drawString("Select an item:", 50, 150);
-
-    // ===== MENU GRID (3x2) =====
-    int boxWidth = 280;
-    int boxHeight = 100;
-    int spacing = 20;
-    int startX = 50;
-    int startY = 200;
-
-    for (int i = 0; i < MENU_COUNT; i++) {
-        int col = i % 3;
-        int row = i / 3;
-        int xPos = startX + col * (boxWidth + spacing);
-        int yPos = startY + row * (boxHeight + spacing);
-
-        // Draw box with selection border
-        uint16_t boxColor = (g_paper4.selectedMenuIdx == i) ? TFT_BLACK : TFT_LIGHTGREY;
-        M5.Lcd.drawRect(xPos, yPos, boxWidth, boxHeight, boxColor);
-
-        // Menu item text
-        M5.Lcd.setTextSize(2);
-        M5.Lcd.setTextColor(TFT_BLACK);
-        char menuBuf[64];
-        snprintf(menuBuf, sizeof(menuBuf), "%s %s %d",
-                 menuItems[i].emoji, menuItems[i].name, menuItems[i].cost);
-        M5.Lcd.drawString(menuBuf, xPos + 10, yPos + 15);
-
-        // Selected indicator
-        if (g_paper4.selectedMenuIdx == i) {
-            M5.Lcd.drawString("✓", xPos + boxWidth - 40, yPos + 10);
+    // Menu List
+    for (int i = 0; i < NUM_MENU; i++) {
+        String text = String(i + 1) + ". " + menuList[i].name + " .... " + String(menuList[i].coin) + " CCoin";
+        
+        // Highlight selection
+        if (i == selectedMenuIndex) {
+            M5.EPD.FillRect(50, START_Y_MENU + i * ROW_HEIGHT_MENU, 540, ROW_HEIGHT_MENU, 0x0000); // Black background
+            M5.EPD.SetTextColor(0xFFFF, 0x0000); // White text
+        } else {
+            M5.EPD.FillRect(50, START_Y_MENU + i * ROW_HEIGHT_MENU, 540, ROW_HEIGHT_MENU, 0xFFFF); // White background
+            M5.EPD.SetTextColor(0x0000, 0xFFFF); // Black text
         }
+        
+        M5.EPD.DrawString(text.c_str(), 60, START_Y_MENU + i * ROW_HEIGHT_MENU + (ROW_HEIGHT_MENU / 2) - 10);
     }
-
-    // ===== ORDER BUTTON =====
-    int orderY = 450;
-    int orderWidth = 300;
-    int orderHeight = 60;
-    int orderX = (PAPER_WIDTH - orderWidth) / 2;
-
-    M5.Lcd.drawRect(orderX, orderY, orderWidth, orderHeight, TFT_BLACK);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.setTextColor(TFT_BLACK);
-    M5.Lcd.drawString("Order Now", orderX + 60, orderY + 12);
-
-    // ===== STATUS =====
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.drawString(g_paper4.lastOrderStatus.c_str(), 50, 510);
+    
+    M5.EPD.UpdateFull(mode);
 }
 
-void drawProcessingScreen() {
-    M5.Lcd.fillScreen(TFT_WHITE);
-    M5.Lcd.setTextSize(3);
-    M5.Lcd.setTextColor(TFT_BLACK);
-    M5.Lcd.drawString("Processing Order...", 200, 200);
-}
-
-void drawErrorScreen(const String &msg) {
-    M5.Lcd.fillScreen(TFT_WHITE);
-    M5.Lcd.setTextSize(3);
-    M5.Lcd.setTextColor(TFT_BLACK);
-    M5.Lcd.drawString("Error:", 50, 200);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.drawString(msg.c_str(), 50, 280);
-    M5.Lcd.drawString("Try again...", 50, 400);
-    delay(2000);
-}
-
-// ============================================
-// TOUCH INPUT HANDLER
-// ============================================
-void handleTouchInput() {
-    auto t = M5.Touch.getDetail();
-    if (!t.isPressed()) return;
-
-    uint16_t touchX = t.x;
-    uint16_t touchY = t.y;
-
-    // Check menu selection
-    int boxWidth = 280;
-    int boxHeight = 100;
-    int spacing = 20;
-    int startX = 50;
-    int startY = 200;
-
-    for (int i = 0; i < MENU_COUNT; i++) {
-        int col = i % 3;
-        int row = i / 3;
-        int xPos = startX + col * (boxWidth + spacing);
-        int yPos = startY + row * (boxHeight + spacing);
-
-        if (touchX >= xPos && touchX <= xPos + boxWidth &&
-            touchY >= yPos && touchY <= yPos + boxHeight) {
-            g_paper4.selectedMenuIdx = i;
-            drawUI();
+// --- ฟังก์ชัน Touch Handler ---
+void handleTouch(int x, int y) {
+    // Check Menu List Area
+    for (int i = 0; i < NUM_MENU; i++) {
+        if (x > 50 && x < 590 && y > START_Y_MENU + i * ROW_HEIGHT_MENU && y < START_Y_MENU + (i + 1) * ROW_HEIGHT_MENU) {
+            selectedMenuIndex = i;
+            Serial.printf("Menu selected: %s\n", menuList[i].name.c_str());
+            // 24. อนุญาตให้เลือกเมนูผ่าน Touch Screen
+            drawMenuDashboard(UPDATE_MODE_DU4);
             return;
         }
     }
-
-    // Check order button
-    int orderY = 450;
-    int orderWidth = 300;
-    int orderHeight = 60;
-    int orderX = (PAPER_WIDTH - orderWidth) / 2;
-
-    if (touchX >= orderX && touchX <= orderX + orderWidth &&
-        touchY >= orderY && touchY <= orderY + orderHeight) {
-        if (g_paper4.selectedMenuIdx >= 0) {
-            submitOrder();
-        }
-    }
 }
 
-void submitOrder() {
-    if (g_paper4.selectedMenuIdx < 0 || g_paper4.orderInProgress) return;
+// --- ฟังก์ชัน HTTP Server Handlers ---
+// Endpoint สำหรับรับ Request Order จาก Atom Matrix (Tap-to-Pay)
+void handleGetOrder(AsyncWebServerRequest *request) {
+    if (selectedMenuIndex != -1) {
+        // 25. ส่งข้อมูล Order ไปยัง Atom Matrix
+        Menu selected = menuList[selectedMenuIndex];
+        String body = "{\"item\": \"" + selected.name + "\", \"amount\": " + String(selected.coin) + "}";
+        
+        // ส่ง Order Info กลับไปยัง Atom Matrix (Endpoint '/order_info' on Atom Matrix)
+        HTTPClient http;
+        String url = String("http://") + IP_ATOM_MATRIX.toString() + "/order_info";
+        http.begin(url);
+        http.addHeader("Content-Type", "application/json");
+        http.POST(body);
+        http.end();
+        
+        // Clear selection to prevent double payment
+        selectedMenuIndex = -1;
+        drawMenuDashboard(UPDATE_MODE_DU4);
 
-    MenuItem &selected = menuItems[g_paper4.selectedMenuIdx];
-
-    // Check balance
-    if (g_paper4.balance < selected.cost) {
-        drawErrorScreen("Insufficient Balance!");
-        drawUI();
-        return;
-    }
-
-    g_paper4.orderInProgress = true;
-    drawProcessingScreen();
-
-    // Send order via ESP-NOW
-    ShowcaseMessage msg = createMessage(MSG_SPEND_REQUEST, g_paper4.currentUsername.c_str(),
-                                        selected.cost, selected.name);
-
-    esp_err_t result = esp_now_send(BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
-
-    if (result == ESP_OK) {
-        Serial.printf("[OK] Order submitted: %s (-%d coins)\n", selected.name, selected.cost);
-        g_paper4.balance -= selected.cost;
-        g_paper4.lastOrderStatus = "✓ Order placed!";
+        request->send(200, "text/plain", "Order information sent to Atom Matrix.");
     } else {
-        Serial.println("[ERROR] Failed to send order");
-        g_paper4.lastOrderStatus = "✗ Order failed!";
-    }
-
-    delay(1000);
-    g_paper4.orderInProgress = false;
-    g_paper4.selectedMenuIdx = -1;
-    drawUI();
-}
-
-// ============================================
-// ESP-NOW MESSAGE HANDLER
-// ============================================
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-    if (len != sizeof(ShowcaseMessage)) return;
-
-    ShowcaseMessage msg;
-    memcpy(&msg, incomingData, sizeof(msg));
-
-    if (!verifyChecksum(msg)) {
-        Serial.println("[WARN] Checksum verification failed");
-        return;
-    }
-
-    switch (msg.type) {
-        case MSG_IDENTITY_ASSIGN:
-            if (msg.username[0] != '\0') {
-                g_paper4.currentUsername = String(msg.username);
-                g_paper4.balance = 0;
-                g_paper4.selectedMenuIdx = -1;
-                g_paper4.lastOrderStatus = "Ready";
-                Serial.printf("[OK] Identity updated: %s\n", msg.username);
-                drawUI();
-            }
-            break;
-
-        case MSG_EARN_COIN:
-            g_paper4.balance += msg.amount;
-            Serial.printf("[OK] Balance updated: %d\n", g_paper4.balance);
-            drawUI();
-            break;
-
-        case MSG_SPEND_CONFIRM:
-            if (msg.status == 1) {  // Success
-                g_paper4.lastOrderStatus = "✓ Transaction Complete!";
-                Serial.println("[OK] Transaction confirmed");
-            } else {
-                g_paper4.lastOrderStatus = "✗ Transaction Failed!";
-                Serial.println("[WARN] Transaction failed");
-            }
-            drawUI();
-            break;
-
-        case MSG_RESET_ALL:
-            g_paper4.currentUsername = "Guest";
-            g_paper4.balance = 0;
-            g_paper4.selectedMenuIdx = -1;
-            g_paper4.orderInProgress = false;
-            g_paper4.lastOrderStatus = "Ready";
-            Serial.println("[OK] System reset");
-            drawUI();
-            break;
-
-        default:
-            break;
+        request->send(400, "text/plain", "No menu selected.");
     }
 }
 
-// ============================================
-// SETUP
-// ============================================
+void handleSystemReset(AsyncWebServerRequest *request) {
+    selectedMenuIndex = -1;
+    // 52. รีเซ็ตการเลือกเมนู
+    drawMenuDashboard();
+    request->send(200, "text/plain", "M5-Paper S4 reset complete.");
+}
+
+// --- Setup Function ---
 void setup() {
     M5.begin();
-    M5.Lcd.setRotation(1);
+    M5.EPD.SetRotation(90); // Landscape
     Serial.begin(115200);
-    delay(500);
 
-    Serial.println("\n\n=== STATION 4: PAPER STARTING ===");
+    // กำหนด Static IP
+    WiFi.config(IP_PAPER_S4, IP_CORE2, IPAddress(255, 255, 255, 0));
+    WiFi.begin(AP_SSID, AP_PASSWORD);
 
-    // Clear screen
-    M5.Lcd.fillScreen(TFT_WHITE);
-
-    // Initialize WiFi
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false);
-    delay(100);
-
-    // Initialize ESP-NOW
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[ERROR] ESP-NOW initialization failed");
-        while (1) delay(1000);
+    Serial.println("Connecting to AP...");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
     }
+    Serial.print("\nConnected to AP. IP: ");
+    Serial.println(WiFi.localIP());
 
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, BROADCAST_MAC, 6);
-    peerInfo.channel = BROADCAST_CHANNEL;
-    peerInfo.encrypt = false;
-    esp_now_add_peer(&peerInfo);
+    // ตั้งค่า Server Endpoints
+    server.on(ENDPOINT_GET_ORDER, HTTP_POST, handleGetOrder);
+    server.on(ENDPOINT_RESET_MENU, HTTP_POST, handleSystemReset);
 
-    esp_now_register_recv_cb(onDataRecv);
+    server.begin();
 
-    Serial.println("[OK] ESP-NOW initialized");
-
-    // Draw initial UI
-    drawUI();
-
-    Serial.println("=== STATION 4 PAPER READY ===\n");
+    // 23. แสดง Menu List
+    drawMenuDashboard();
 }
 
-// ============================================
-// MAIN LOOP
-// ============================================
 void loop() {
     M5.update();
-    handleTouchInput();
-
-    // Periodic UI refresh
-    if (millis() - g_paper4.lastUpdateTime > 5000) {
-        drawUI();
-        g_paper4.lastUpdateTime = millis();
+    
+    // Handle Touch Input
+    if (M5.TP.avaliable()) {
+        M5.TP.Get>>tpData;
+        if (tpData.touches != 0) {
+            handleTouch(tpData.points[0].x, tpData.points[0].y);
+        }
+        tpData.touches = 0;
     }
-
-    delay(100);
+    
+    delay(50);
 }

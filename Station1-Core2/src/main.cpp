@@ -1,341 +1,266 @@
+// Station1_Core2_AP.cpp
+// Hardware: M5Stack Core2
+// Function: WiFi AP, DHCP, DNS, Captive Portal, User Registration
+// [Updated] Added setReuse(false) and increased delays to fix "Connection reset by peer"
+
 #include <M5Core2.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
-#include <WebServer.h>
-#include <esp_now.h>
-#include <SPIFFS.h>
-#include "../include/ShowcaseProtocol.h"
+#include <esp_wifi.h>
+#include <qrcode.h>
+#include "config.h"
+#include "Participant.h"
 
-// ============================================
-// CONFIGURATION
-// ============================================
-const char *SSID_AP = "Web3_Showcase";
-const char *PASS_AP = "";
-const byte DNS_PORT = 53;
-IPAddress apIP(192, 168, 4, 1);
-
-// ============================================
-// GLOBAL STATE
-// ============================================
 DNSServer dnsServer;
-WebServer webServer(80);
-String lastUsername = "Guest";
-unsigned long lastUIUpdate = 0;
-bool espNowReady = false;
+AsyncWebServer server(80);
+Participant participant;
 
-// ============================================
-// HTML FORM (Dark Theme + Responsive UI)
-// ============================================
+const int QR_WIDTH = 180;
+const int QR_X = (320 - QR_WIDTH) / 2;
+
+// Flag เพื่อบอก loop() ว่าต้องส่งข้อมูล
+bool shouldSyncUser = false;
+
+// --- Embedded HTML Code ---
 const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML>
+<!DOCTYPE html>
 <html>
 <head>
-  <title>Web3 Showcase - Identity</title>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { 
-      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
-      background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-    }
-    .container { 
-      background: #2d2d2d;
-      border-radius: 15px;
-      padding: 40px;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
-      max-width: 500px;
-      width: 100%;
-      border: 1px solid #444;
-    }
-    h1 { 
-      color: #007bff;
-      margin-bottom: 10px;
-      font-size: 28px;
-      text-align: center;
-    }
-    .subtitle { 
-      color: #aaa;
-      text-align: center;
-      margin-bottom: 30px;
-      font-size: 14px;
-    }
-    .qr-section { 
-      background: #1a1a1a;
-      padding: 20px;
-      border-radius: 10px;
-      margin-bottom: 30px;
-      text-align: center;
-      border: 1px solid #444;
-    }
-    .qr-label { 
-      color: #aaa;
-      font-size: 12px;
-      margin-bottom: 10px;
-    }
-    input { 
-      width: 100%;
-      padding: 14px;
-      margin: 15px 0;
-      border: 2px solid #444;
-      border-radius: 8px;
-      font-size: 16px;
-      background: #1a1a1a;
-      color: white;
-      transition: border-color 0.3s;
-    }
-    input:focus { 
-      outline: none;
-      border-color: #007bff;
-    }
-    input::placeholder {
-      color: #666;
-    }
-    button { 
-      width: 100%;
-      padding: 14px;
-      background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
-      color: white;
-      border: none;
-      border-radius: 8px;
-      font-size: 16px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: transform 0.2s, box-shadow 0.2s;
-    }
-    button:hover { 
-      transform: translateY(-2px);
-      box-shadow: 0 10px 25px rgba(0, 123, 255, 0.4);
-    }
-    button:active { 
-      transform: translateY(0);
-    }
-    .info {
-      color: #888;
-      font-size: 12px;
-      margin-top: 20px;
-      text-align: center;
-    }
-  </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Web3 Student Club</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background-color: #f4f4f9; padding-top: 50px; margin: 0; }
+        .container { background: white; max-width: 350px; margin: 0 auto; padding: 30px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-bottom: 20px; font-size: 24px; }
+        p { color: #666; margin-bottom: 30px; }
+        input[type="text"] { width: 100%; padding: 12px; margin-bottom: 20px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; font-size: 16px; }
+        button { background-color: #007bff; color: white; padding: 14px 20px; border: none; border-radius: 8px; cursor: pointer; width: 100%; font-size: 18px; font-weight: bold; transition: background 0.3s; }
+        button:hover { background-color: #0056b3; }
+        .footer { margin-top: 20px; font-size: 12px; color: #999; }
+    </style>
 </head>
 <body>
-  <div class="container">
-    <h1>🎯 Web3 Showcase</h1>
-    <p class="subtitle">Create Your Digital Identity</p>
-    
-    <div class="qr-section">
-      <p class="qr-label">📱 Scan QR Code to Connect</p>
-      <p style="font-size: 11px; color: #666;">WiFi: Web3_Showcase (Open Network)</p>
+    <div class="container">
+        <h1>🚀 Web3 Student Club</h1>
+        <p>Enter your unique username to generate your event identity.</p>
+        
+        <form action="/submit_identity" method="POST">
+            <input type="text" name="username" placeholder="Username (e.g. Alice)" required minlength="3" autofocus>
+            <button type="submit">Create Identity</button>
+        </form>
+        
+        <div class="footer">Station 1: Identity Creation</div>
     </div>
-
-    <form action="/submit" method="POST">
-      <input 
-        type="text" 
-        name="username" 
-        placeholder="Enter your name (2-12 chars)"
-        minlength="2"
-        maxlength="12"
-        required
-        autocomplete="off"
-      >
-      <button type="submit">✓ Create Identity</button>
-    </form>
-
-    <div class="info">
-      ✓ Check your wearable device after submission
-    </div>
-  </div>
 </body>
 </html>
 )rawliteral";
 
-// ============================================
-// ESP-NOW INITIALIZATION
-// ============================================
-void initESPNow() {
-    WiFi.mode(WIFI_AP_STA);
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[ERROR] ESP-NOW Init Failed");
-        return;
-    }
+const char success_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: sans-serif; text-align: center; padding-top: 50px; background-color: #e8f5e9; }
+        .card { background: white; padding: 30px; border-radius: 15px; display: inline-block; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { color: #2e7d32; }
+        p { font-size: 18px; color: #333; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>✅ Identity Created!</h1>
+        <p>Please check your Wearable.</p>
+        <p>Proceed to Station 2.</p>
+    </div>
+</body>
+</html>
+)rawliteral";
 
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, BROADCAST_MAC, 6);
-    peerInfo.channel = BROADCAST_CHANNEL;
-    peerInfo.encrypt = false;
+// --- Helper: QR Code Drawing Function ---
+void drawQRCode(const char* text, int x_start, int y_start, int size, int scale) {
+    QRCode qrcode;
+    uint8_t qrcodeData[qrcode_getBufferSize(3)];
+    qrcode_initText(&qrcode, qrcodeData, 3, 0, text);
 
-    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        Serial.println("[ERROR] Failed to add broadcast peer");
-        return;
+    int qr_size = qrcode.size;
+    int scaled_size = qr_size * scale;
+    
+    M5.Lcd.fillRect(x_start - 5, y_start - 5, scaled_size + 10, scaled_size + 10, WHITE);
+
+    for (uint8_t y = 0; y < qr_size; y++) {
+        for (uint8_t x = 0; x < qr_size; x++) {
+            if (qrcode_getModule(&qrcode, x, y)) {
+                M5.Lcd.fillRect(x_start + (x * scale), y_start + (y * scale), scale, scale, BLACK);
+            }
+        }
     }
-    espNowReady = true;
-    Serial.println("[OK] ESP-NOW initialized");
 }
 
-// ============================================
-// SEND USERNAME TO STICKC
-// ============================================
-void sendIdentityToStickC(const String &username) {
-    if (!espNowReady) {
-        M5.Lcd.fillRect(0, 140, 320, 100, TFT_RED);
-        M5.Lcd.setTextColor(TFT_WHITE);
-        M5.Lcd.setCursor(10, 160);
-        M5.Lcd.setTextSize(2);
-        M5.Lcd.print("ESP-NOW Error");
-        return;
+// --- Helper: Send Data to other Stations ---
+void syncUserToStations() {
+    String postData = "username=" + participant.Username;
+    
+    Serial.printf("Sending Username: '%s'\n", participant.Username.c_str());
+
+    // [Fix] แยก Scope เพื่อบังคับให้สร้าง Connection ใหม่ทุกครั้ง ไม่ Reuse
+    // --- 1. Sync to StickC ---
+    {
+        WiFiClient client;
+        HTTPClient http;
+        http.setReuse(false); // [Added] ป้องกันการใช้ Socket เก่าซ้ำ
+        http.setTimeout(3000); // [Increased] เพิ่มเวลา Timeout
+        
+        Serial.println("Syncing user to StickC...");
+        if (http.begin(client, "http://" + IP_STICKC.toString() + ENDPOINT_SET_USER)) {
+            http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+            int code = http.POST(postData);
+            
+            if (code > 0) {
+                Serial.printf("StickC Response: %d (Success)\n", code);
+            } else {
+                Serial.printf("StickC Failed: %s\n", http.errorToString(code).c_str());
+            }
+            http.end(); 
+            client.stop(); // [Added] บังคับปิด Socket ทันที
+        } else {
+            Serial.println("StickC: Connect Failed");
+        }
     }
 
-    ShowcaseMessage msg = createMessage(MSG_IDENTITY_ASSIGN, username.c_str(), 0, "");
-    esp_err_t result = esp_now_send(BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
+    delay(500); // [Increased] พักนานขึ้นเพื่อให้ Network Stack คืนทรัพยากร (สำคัญ!)
 
-    // Clear previous status
-    M5.Lcd.fillRect(0, 140, 320, 100, TFT_BLACK);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.setCursor(10, 160);
-
-    if (result == ESP_OK) {
-        M5.Lcd.setTextColor(TFT_GREEN);
-        M5.Lcd.printf("✓ Sent: %s", username.c_str());
-        lastUsername = username;
-        Serial.printf("[OK] Identity sent: %s\n", username.c_str());
-    } else {
-        M5.Lcd.setTextColor(TFT_RED);
-        M5.Lcd.print("✗ Send Failed");
-        Serial.println("[ERROR] Failed to send identity");
+    // --- 2. Sync to Station 2 ---
+    {
+        WiFiClient client;
+        HTTPClient http;
+        http.setReuse(false); // [Added]
+        http.setTimeout(3000); // [Increased]
+        
+        Serial.println("Syncing user to Station 2...");
+        if (http.begin(client, "http://" + IP_STATION2_MON.toString() + ENDPOINT_SET_USER)) {
+            http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+            int code = http.POST(postData);
+            
+            if (code > 0) {
+                Serial.printf("Station2 Response: %d (Success)\n", code);
+            } else {
+                Serial.printf("Station2 Failed: %s\n", http.errorToString(code).c_str());
+            }
+            http.end();
+            client.stop(); // [Added]
+        } else {
+             Serial.println("Station2: Connect Failed");
+        }
     }
-    lastUIUpdate = millis();
 }
 
-// ============================================
-// UI DRAWING
-// ============================================
 void drawUI() {
-    M5.Lcd.fillScreen(TFT_BLACK);
-
-    // Header
-    M5.Lcd.fillRect(0, 0, 320, 60, TFT_NAVY);
-    M5.Lcd.setTextColor(TFT_WHITE);
-    M5.Lcd.setTextSize(3);
-    M5.Lcd.drawString("STATION 1", 20, 15);
-
-    // QR Code area
-    M5.Lcd.setTextColor(TFT_CYAN);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.drawString("QR Code:", 20, 75);
-
-    // Generate and display QR
-    String qrData = "WIFI:S:" + String(SSID_AP) + ";T:nopass;;";
-    M5.Lcd.qrcode(qrData.c_str(), 50, 100, 140, 5);
-
-    // Info
-    M5.Lcd.setTextColor(TFT_ORANGE);
-    M5.Lcd.setTextSize(2);
-    M5.Lcd.drawString("Go to: Web3_Showcase", 20, 320);
-
-    // Status
-    M5.Lcd.setTextColor(TFT_LIGHTGREY);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.drawString("Last user: " + lastUsername, 20, 350);
+    M5.Lcd.fillScreen(BLACK);
+    
+    if (participant.Username == "") {
+        M5.Lcd.setTextDatum(TC_DATUM);
+        M5.Lcd.setTextColor(WHITE, BLACK);
+        M5.Lcd.setTextFont(4);
+        M5.Lcd.drawString("Station 1: Identity", 160, 10);
+        
+        String wifiQR = "WIFI:S:" + String(AP_SSID) + ";T:nopass;;"; 
+        drawQRCode(wifiQR.c_str(), (320-145)/2, 50, 1, 5); 
+        
+        M5.Lcd.setTextFont(2);
+        M5.Lcd.drawString("Connect WiFi & Create ID", 160, 210);
+    } else {
+        M5.Lcd.setTextDatum(MC_DATUM);
+        M5.Lcd.setTextColor(GREEN, BLACK);
+        M5.Lcd.setTextFont(4);
+        M5.Lcd.drawString("ID Created!", 160, 100);
+        
+        M5.Lcd.setTextColor(WHITE, BLACK);
+        M5.Lcd.drawString(participant.Username, 160, 140);
+        
+        M5.Lcd.setTextFont(2);
+        M5.Lcd.drawString("Proceed to Station 2", 160, 180);
+    }
 }
 
-// ============================================
-// SETUP
-// ============================================
-void setup() {
-    M5.begin(true, true, true, true);
-    Serial.begin(115200);
-    delay(500);
-
-    Serial.println("\n\n=== STATION 1: CORE2 STARTING ===");
-
-    // Initialize SPIFFS if needed for static files
-    if (!SPIFFS.begin(true)) {
-        Serial.println("[WARN] SPIFFS mount failed");
-    }
-
-    // Draw initial UI
-    drawUI();
-
-    // Setup WiFi AP
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    if (!WiFi.softAP(SSID_AP, PASS_AP, BROADCAST_CHANNEL, 0, 4)) {
-        Serial.println("[ERROR] SoftAP creation failed");
-        return;
-    }
-    Serial.printf("[OK] SoftAP started: %s\n", SSID_AP);
-
-    // Setup DNS
-    dnsServer.start(DNS_PORT, "*", apIP);
-    Serial.println("[OK] DNS server started");
-
-    // Setup Web Server routes
-    webServer.on("/", HTTP_GET, [](void) {
-        webServer.send(200, "text/html", index_html);
+void setupWebHandlers() {
+    auto redirect = [](AsyncWebServerRequest *request) {
+        request->redirect("http://192.168.4.1/");
+    };
+    
+    server.on("/generate_204", redirect);
+    server.on("/redirect", redirect);
+    server.on("/hotspot-detect.html", redirect);
+    server.on("/canonical.html", redirect);
+    server.on("/ncsi.txt", redirect);
+    
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send_P(200, "text/html", index_html);
     });
 
-    webServer.on("/submit", HTTP_POST, [](void) {
-        if (webServer.hasArg("username")) {
-            String username = webServer.arg("username");
-            // Sanitize input
-            username.trim();
-            if (username.length() > 0 && username.length() <= 12) {
-                // Send success page
-                webServer.send(200, "text/html",
-                    "<html><body style='font-family:Arial;text-align:center;padding:40px;background:#2d2d2d;color:white;'>"
-                    "<h1 style='color:#00aa00;'>✓ Success!</h1>"
-                    "<p>Identity created: <b>" + username + "</b></p>"
-                    "<p>Check your wearable device...</p>"
-                    "<a href='/' style='color:#007bff;text-decoration:none;'>← Back</a>"
-                    "</body></html>");
-                sendIdentityToStickC(username);
-            } else {
-                webServer.send(400, "text/html",
-                    "<html><body style='font-family:Arial;text-align:center;padding:40px;background:#2d2d2d;color:white;'>"
-                    "<h1 style='color:#ff5555;'>✗ Invalid Input</h1>"
-                    "<p>Name must be 2-12 characters</p>"
-                    "<a href='/' style='color:#007bff;text-decoration:none;'>← Back</a>"
-                    "</body></html>");
-            }
+    server.on("/submit_identity", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (request->hasParam("username", true)) {
+            // [Fix] รับค่ามาก่อน
+            String inputName = request->getParam("username", true)->value();
+            
+            // [Fix] Reset ข้อมูลเก่าทิ้ง
+            participant.reset();
+            
+            // [Fix] แล้วค่อยใส่ค่าใหม่ลงไป (ไม่งั้น reset จะล้างทิ้งหมด)
+            participant.Username = inputName;
+            
+            shouldSyncUser = true; 
+            drawUI();
+            request->send_P(200, "text/html", success_html);
         } else {
-            webServer.send(400, "text/plain", "Missing username field");
+            request->send(400, "text/plain", "Missing Username");
         }
     });
 
-    webServer.onNotFound([](void) {
-        webServer.send(200, "text/html", index_html);
+    server.on(ENDPOINT_RESET_GLOBAL, HTTP_POST, [](AsyncWebServerRequest *request){
+        participant.reset();
+        drawUI();
+        request->send(200, "text/plain", "S1 Reset");
     });
 
-    webServer.begin();
-    Serial.println("[OK] Web server started on port 80");
-
-    // Initialize ESP-NOW
-    initESPNow();
-
-    Serial.println("=== STATION 1 READY ===\n");
+    server.onNotFound(redirect);
 }
 
-// ============================================
-// MAIN LOOP
-// ============================================
+void setup() {
+    M5.begin(true, false, true, true); 
+    
+    WiFi.mode(WIFI_AP);
+    
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    
+    wifi_init_config_t conf = WIFI_INIT_CONFIG_DEFAULT();
+    conf.ampdu_rx_enable = false; 
+    esp_wifi_init(&conf);
+    esp_wifi_start();
+    
+    delay(100);
+
+    WiFi.softAPConfig(IP_STATION1_AP, IP_STATION1_AP, NETMASK);
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    
+    dnsServer.start(53, "*", IP_STATION1_AP);
+    
+    setupWebHandlers();
+    server.begin();
+    
+    drawUI();
+}
+
 void loop() {
-    // Handle DNS and HTTP requests
-    dnsServer.processNextRequest();
-    webServer.handleClient();
-
-    // Handle button presses
     M5.update();
+    dnsServer.processNextRequest();
 
-    // Periodic UI refresh
-    if (millis() - lastUIUpdate > 10000) {
-        drawUI();
-        lastUIUpdate = millis();
+    if (shouldSyncUser) {
+        syncUserToStations();
+        shouldSyncUser = false;
     }
-
-    delay(10);
 }

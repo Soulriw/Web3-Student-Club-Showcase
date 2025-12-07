@@ -1,164 +1,134 @@
-#include <Arduino.h>
-#include <M5Unified.h>
-#include <esp_now.h>
+// Reset_CoreBasic.cpp
+// Hardware: M5Stack Core Basic
+// Function: System Monitor (Ping all devices) & Global Reset Button
+
+#include <M5Stack.h> // ใช้ Library M5Stack สำหรับ Core Basic
 #include <WiFi.h>
-#include "../include/ShowcaseProtocol.h"
+#include <HTTPClient.h>
+#include "config.h"
 
-// ============================================
-// CONFIGURATION
-// ============================================
-#define LED_IDLE_COLOR 0x00FF00      // Green - idle
-#define LED_RESET_COLOR 0xFF0000     // Red - resetting
-#define LED_OFF 0x000000
-
-#define RESET_HOLD_TIME 1000  // 1 second hold to trigger reset
-
-// ============================================
-// GLOBAL STATE
-// ============================================
-struct {
-    uint32_t buttonPressTime;
-    bool resetInProgress;
-    uint32_t resetStartTime;
-} g_reset = {
-    0, false, 0
+struct Device {
+    String name;
+    IPAddress ip;
+    bool online;
+    int lastResponseTime;
 };
 
-// ============================================
-// LED FUNCTIONS
-// ============================================
-void setMatrixColor(uint32_t color) {
-    // M5Unified supports drawPixel for LED matrix
-    for (int i = 0; i < 25; i++) {
-        M5.Lcd.drawPixel(i % 5, i / 5, color);
-    }
-}
+Device devices[] = {
+    {"S1: AP/Identity", IP_STATION1_AP, false, 0},
+    {"S2: Monitor", IP_STATION2_MON, false, 0},
+    {"Wearable", IP_STICKC, false, 0},
+    {"Atom Sensor", IP_ATOM_MATRIX, false, 0},
+    {"Atom Echo", IP_ATOM_ECHO, false, 0},
+    {"Paper Earn", IP_PAPER_S3, false, 0},
+    {"Paper Spend", IP_PAPER_S4, false, 0}
+};
+const int NUM_DEVICES = 7;
 
-void blinkMatrix(uint32_t color, int count) {
-    for (int i = 0; i < count; i++) {
-        setMatrixColor(color);
-        delay(200);
-        setMatrixColor(LED_OFF);
-        delay(200);
-    }
-}
+void checkDevices() {
+    HTTPClient http;
+    http.setTimeout(200); // Fast timeout
 
-// ============================================
-// RESET BROADCAST
-// ============================================
-void broadcastReset() {
-    if (g_reset.resetInProgress) return;
-
-    g_reset.resetInProgress = true;
-    g_reset.resetStartTime = millis();
-
-    Serial.println("\n[!!!] SYSTEM RESET TRIGGERED [!!!]");
-    setMatrixColor(LED_RESET_COLOR);
-
-    // Create reset message
-    ShowcaseMessage resetMsg = createMessage(MSG_RESET_ALL, "", 0, "");
-
-    // Send reset broadcast 3 times for redundancy
-    for (int attempt = 0; attempt < 3; attempt++) {
-        esp_err_t result = esp_now_send(BROADCAST_MAC, (uint8_t *)&resetMsg, sizeof(resetMsg));
-        if (result == ESP_OK) {
-            Serial.printf("[OK] Reset broadcast #%d sent\n", attempt + 1);
-        } else {
-            Serial.printf("[WARN] Reset broadcast #%d failed\n", attempt + 1);
+    for (int i = 0; i < NUM_DEVICES; i++) {
+        String url = "http://" + devices[i].ip.toString() + ENDPOINT_HEARTBEAT;
+        
+        // Skip pinging self if we were in the list, but we aren't
+        if (devices[i].ip == IP_STATION1_AP) {
+            // Special check for AP (Gateway) - Just check wifi connection
+            devices[i].online = (WiFi.status() == WL_CONNECTED);
+            continue;
         }
-        delay(100);
+
+        http.begin(url);
+        int code = http.GET();
+        http.end();
+
+        if (code == 200) {
+            devices[i].online = true;
+        } else {
+            devices[i].online = false;
+        }
     }
-
-    // Blink red to confirm
-    blinkMatrix(LED_RESET_COLOR, 5);
-
-    // Return to idle state
-    setMatrixColor(LED_IDLE_COLOR);
-    g_reset.resetInProgress = false;
-
-    Serial.println("[OK] System reset complete\n");
 }
 
-// ============================================
-// ESP-NOW INITIALIZATION
-// ============================================
-void initESPNow() {
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false);
-    delay(100);
-
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[ERROR] ESP-NOW initialization failed");
-        setMatrixColor(0xFF0000);
-        while (1) delay(1000);
+void drawDashboard() {
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.setTextColor(WHITE, BLACK);
+    M5.Lcd.setCursor(10, 10);
+    M5.Lcd.print("SYSTEM MONITOR");
+    
+    M5.Lcd.setTextSize(1);
+    int y = 40;
+    for (int i = 0; i < NUM_DEVICES; i++) {
+        M5.Lcd.setCursor(10, y);
+        if (devices[i].online) {
+            M5.Lcd.setTextColor(GREEN, BLACK);
+            M5.Lcd.printf("[ON]  %s", devices[i].name.c_str());
+        } else {
+            M5.Lcd.setTextColor(RED, BLACK);
+            M5.Lcd.printf("[OFF] %s", devices[i].name.c_str());
+        }
+        y += 20;
     }
 
-    // Add broadcast peer
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, BROADCAST_MAC, 6);
-    peerInfo.channel = BROADCAST_CHANNEL;
-    peerInfo.encrypt = false;
-
-    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        Serial.println("[ERROR] Failed to add peer");
-        return;
-    }
-
-    Serial.println("[OK] ESP-NOW initialized");
+    // Reset Button Prompt
+    M5.Lcd.setTextColor(YELLOW, BLACK);
+    M5.Lcd.setCursor(40, 210);
+    M5.Lcd.print("Btn B: GLOBAL RESET");
 }
 
-// ============================================
-// SETUP
-// ============================================
+void triggerGlobalReset() {
+    M5.Lcd.fillScreen(RED);
+    M5.Lcd.setCursor(50, 110);
+    M5.Lcd.setTextColor(WHITE);
+    M5.Lcd.print("RESETTING...");
+    
+    HTTPClient http;
+    http.setTimeout(500);
+    
+    for (int i = 0; i < NUM_DEVICES; i++) {
+        if (!devices[i].online) continue;
+        
+        String url = "http://" + devices[i].ip.toString() + ENDPOINT_RESET_GLOBAL;
+        http.begin(url);
+        http.POST("{}");
+        http.end();
+    }
+    
+    delay(1000);
+    drawDashboard();
+}
+
 void setup() {
     M5.begin();
-    Serial.begin(115200);
-    delay(500);
-
-    Serial.println("\n\n=== RESET SYSTEM: ATOM MATRIX STARTING ===");
-
-    // Initialize LED
-    setMatrixColor(LED_IDLE_COLOR);
-    Serial.println("[OK] LED matrix initialized (Green = Ready)");
-
-    // Initialize ESP-NOW
-    initESPNow();
-
-    Serial.println("=== RESET SYSTEM READY ===");
-    Serial.println("Hold Button A for 1 second to reset all stations\n");
+    WiFi.begin(AP_SSID, AP_PASSWORD);
+    
+    M5.Lcd.print("Connecting to S1...");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        M5.Lcd.print(".");
+    }
+    
+    // Static IP for Reset Station
+    WiFi.config(IP_RESET_MON, IP_STATION1_AP, NETMASK, IP_STATION1_AP);
+    
+    drawDashboard();
 }
 
-// ============================================
-// MAIN LOOP
-// ============================================
 void loop() {
     M5.update();
-
-    // Check button state
-    if (M5.BtnA.isPressed()) {
-        // Button is being held
-        if (g_reset.buttonPressTime == 0) {
-            // First frame of press
-            g_reset.buttonPressTime = millis();
-            Serial.println("[INFO] Button pressed - hold for reset");
-        }
-
-        // Check if held long enough
-        uint32_t holdDuration = millis() - g_reset.buttonPressTime;
-        if (holdDuration >= RESET_HOLD_TIME && !g_reset.resetInProgress) {
-            broadcastReset();
-            g_reset.buttonPressTime = 0;  // Reset counter
-        }
-    } else {
-        // Button released
-        if (g_reset.buttonPressTime > 0) {
-            uint32_t pressDuration = millis() - g_reset.buttonPressTime;
-            if (pressDuration < RESET_HOLD_TIME) {
-                Serial.printf("[DEBUG] Button press too short (%lu ms)\n", pressDuration);
-            }
-            g_reset.buttonPressTime = 0;
-        }
+    
+    // Check status every 2 seconds
+    static unsigned long lastCheck = 0;
+    if (millis() - lastCheck > 2000) {
+        checkDevices();
+        drawDashboard();
+        lastCheck = millis();
     }
 
-    delay(50);
+    // Reset Trigger
+    if (M5.BtnB.wasPressed()) {
+        triggerGlobalReset();
+    }
 }

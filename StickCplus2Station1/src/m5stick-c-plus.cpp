@@ -1,124 +1,378 @@
-#include <M5Unified.h>
+#include <M5StickCPlus2.h>
+#include <esp_now.h>
 #include <WiFi.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include "../include/ShowcaseProtocol.h"
 
-// --- ตั้งชื่อ WiFi ที่จะปล่อย ---
-const char *SSID_AP = "Web3Showcase_AP";
-const char *PASSWORD_AP = NULL; // ใส่รหัสผ่านได้ถ้าต้องการ หรือ NULL เพื่อเปิดฟรี
-const int LOCAL_PORT = 88; // Port 80 คือมาตรฐาน HTTP, แต่ถ้าใช้ 88 เวลาเข้าเว็บต้องพิมพ์ 192.168.4.1:88
+// ============================================
+// CONFIGURATION
+// ============================================
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 135
+#define BATTERY_UPDATE_INTERVAL 1000  // 1 second
+#define UI_UPDATE_INTERVAL 500        // 500ms for smooth rendering
 
-// --- ตั้งค่า IP Address ของเครื่องนี้ ---
-// ปกติ M5 จะเป็น 192.168.4.1 แต่ถ้าอยากฟิกเป็น .2 ก็ทำได้
-const IPAddress local_IP(192, 168, 4, 1);     
-const IPAddress gateway(192, 168, 4, 1);
-const IPAddress subnet(255, 255, 255, 0);
+// ============================================
+// GLOBAL STATE
+// ============================================
+struct {
+    String username;
+    int32_t balance;
+    bool authenticated;
+    String status;
+    float batteryVoltage;
+    int batteryPercent;
+    uint32_t lastMessageTime;
+} g_state = {
+    "Guest",
+    0,
+    false,
+    "Waiting...",
+    4.2f,
+    100,
+    0
+};
 
-AsyncWebServer stickCServer(LOCAL_PORT);
-
-String currentUsername = "Not Registered";
-String authenStatus = "X";
-int ccoin = 0;
-String alertText = "Waiting...";
-String myMacAddress = "";
-
-volatile bool needUpdate = false;
-
-void updateDisplay() {
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setCursor(0, 0);
-    
-    M5.Lcd.setTextColor(CYAN);
-    M5.Lcd.print("MAC: "); M5.Lcd.println(myMacAddress);
-    M5.Lcd.print("IP: "); M5.Lcd.println(WiFi.softAPIP()); // โชว์ IP ให้รู้
-    
-    M5.Lcd.setTextColor(WHITE);
-    M5.Lcd.print("User: "); M5.Lcd.println(currentUsername);
-    
-    M5.Lcd.setTextColor(YELLOW);
-    M5.Lcd.print("Coin: "); M5.Lcd.println(ccoin);
-    
-    M5.Lcd.setTextColor(RED);
-    M5.Lcd.println(alertText);
+// ============================================
+// AUDIO FUNCTIONS (Non-blocking)
+// ============================================
+void playToneNonBlocking(int freq, int duration) {
+    M5.Speaker.tone(freq, duration);
 }
 
-void handleUsername(AsyncWebServerRequest *request) {
-    if (request->hasParam("username", true)) {
-        currentUsername = request->getParam("username", true)->value();
-        alertText = "ID Created!";
-        needUpdate = true;
-        // M5.Speaker.tone(1500, 150); 
-        request->send(200, "text/plain", "OK");
-    } else {
-        request->send(400, "text/plain", "No User");
+void playSuccessTone() {
+    playToneNonBlocking(1000, 50);
+    delay(50);
+    playToneNonBlocking(2000, 50);
+    delay(50);
+    playToneNonBlocking(1500, 100);
+}
+
+void playErrorTone() {
+    playToneNonBlocking(500, 200);
+    delay(100);
+    playToneNonBlocking(300, 200);
+}
+
+void playAuthRequestTone() {
+    playToneNonBlocking(1200, 100);
+    delay(100);
+    playToneNonBlocking(1200, 100);
+}
+
+// ============================================
+// BATTERY MONITORING
+// ============================================
+void updateBatteryStatus() {
+    // Get battery info from M5StickCPlus2
+    g_state.batteryVoltage = M5.Power.getBatteryVoltage() / 1000.0f;
+    g_state.batteryPercent = M5.Power.getBatteryLevel();
+    
+    // Clamp to safe values
+    if (g_state.batteryPercent < 0) g_state.batteryPercent = 0;
+    if (g_state.batteryPercent > 100) g_state.batteryPercent = 100;
+}
+
+uint16_t getBatteryColor() {
+    if (g_state.batteryPercent > 70) return TFT_GREEN;
+    if (g_state.batteryPercent > 40) return TFT_ORANGE;
+    return TFT_RED;
+}
+
+void drawBatteryBar(int x, int y, int width, int height) {
+    uint16_t color = getBatteryColor();
+    
+    // Background
+    M5.Lcd.drawRect(x, y, width, height, TFT_WHITE);
+    
+    // Filled portion
+    int filledWidth = (g_state.batteryPercent * width) / 100;
+    if (filledWidth > 0) {
+        M5.Lcd.fillRect(x + 1, y + 1, filledWidth - 1, height - 2, color);
+    }
+    
+    // Percentage text
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.setTextSize(1);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d%%", g_state.batteryPercent);
+    M5.Lcd.drawString(buf, x + width + 5, y);
+}
+
+// ============================================
+// UI DRAWING (Main update function)
+// ============================================
+void drawUI() {
+    M5.Lcd.fillScreen(TFT_BLACK);
+    
+    // ===== HEADER =====
+    M5.Lcd.fillRect(0, 0, SCREEN_WIDTH, 25, TFT_NAVY);
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.drawString("STATION 1", 5, 3);
+    
+    // Auth indicator (right side)
+    M5.Lcd.setTextColor(g_state.authenticated ? TFT_GREEN : TFT_RED);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.drawString(g_state.authenticated ? "✓" : "✗", SCREEN_WIDTH - 25, 3);
+    
+    // ===== USERNAME SECTION =====
+    M5.Lcd.setTextColor(TFT_CYAN);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.drawString("User:", 5, 30);
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.setTextSize(1);
+    String displayName = g_state.username;
+    if (displayName.length() > 14) displayName = displayName.substring(0, 14) + "..";
+    M5.Lcd.drawString(displayName, 5, 40);
+    
+    // ===== BALANCE SECTION =====
+    M5.Lcd.setTextColor(TFT_YELLOW);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.drawString("Balance:", 5, 52);
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.setTextSize(2);
+    char balBuf[32];
+    snprintf(balBuf, sizeof(balBuf), "%d coins", g_state.balance);
+    M5.Lcd.drawString(balBuf, 5, 62);
+    
+    // ===== STATUS SECTION =====
+    M5.Lcd.setTextColor(TFT_LIGHTGREY);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.drawString("Status:", 5, 85);
+    String statusDisplay = g_state.status;
+    if (statusDisplay.length() > 25) statusDisplay = statusDisplay.substring(0, 22) + "...";
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.drawString(statusDisplay, 5, 95);
+    
+    // ===== BATTERY SECTION =====
+    M5.Lcd.setTextColor(TFT_LIGHTGREY);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.drawString("Battery:", 5, 110);
+    drawBatteryBar(5, 118, 80, 10);
+    
+    // Voltage display
+    char voltBuf[12];
+    snprintf(voltBuf, sizeof(voltBuf), "%.2fv", g_state.batteryVoltage);
+    M5.Lcd.setTextColor(TFT_LIGHTGREY);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.drawString(voltBuf, 90, 120);
+}
+
+// ============================================
+// MESSAGE HANDLER - ESP-NOW Callback
+// ============================================
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+    if (len != sizeof(ShowcaseMessage)) {
+        Serial.printf("[WARN] Invalid message size: %d\n", len);
+        return;
+    }
+
+    ShowcaseMessage msg;
+    memcpy(&msg, incomingData, sizeof(msg));
+
+    // Verify checksum
+    if (!verifyChecksum(msg)) {
+        Serial.println("[WARN] Checksum verification failed");
+        return;
+    }
+
+    g_state.lastMessageTime = millis();
+    bool shouldPlaySound = true;
+    bool shouldRedraw = true;
+
+    switch (msg.type) {
+        case MSG_IDENTITY_ASSIGN:
+            if (msg.username[0] != '\0') {
+                g_state.username = String(msg.username);
+                g_state.balance = 0;
+                g_state.authenticated = false;
+                g_state.status = "Identity registered";
+                playSuccessTone();
+                Serial.printf("[OK] Identity assigned: %s\n", msg.username);
+            }
+            break;
+
+        case MSG_AUTH_REQUEST:
+            g_state.status = "Auth in progress...";
+            playAuthRequestTone();
+            Serial.println("[INFO] Authentication in progress");
+            break;
+
+        case MSG_AUTH_SUCCESS:
+            g_state.authenticated = true;
+            g_state.status = "✓ Authenticated!";
+            playSuccessTone();
+            Serial.println("[OK] Authentication successful");
+            break;
+
+        case MSG_EARN_COIN:
+            if (!g_state.authenticated) {
+                g_state.status = "Auth required first";
+                playErrorTone();
+                Serial.println("[WARN] Earn attempt without auth");
+            } else {
+                g_state.balance += msg.amount;
+                if (msg.description[0] != '\0') {
+                    g_state.status = "+" + String(msg.amount) + " (" + String(msg.description) + ")";
+                } else {
+                    g_state.status = "+" + String(msg.amount) + " coins earned";
+                }
+                playSuccessTone();
+                Serial.printf("[OK] Earned %d coins\n", msg.amount);
+            }
+            break;
+
+        case MSG_SPEND_CONFIRM:
+            if (!g_state.authenticated) {
+                g_state.status = "Auth required";
+                playErrorTone();
+            } else if (g_state.balance < msg.amount) {
+                g_state.status = "Insufficient balance!";
+                playErrorTone();
+                Serial.println("[WARN] Insufficient balance");
+            } else {
+                g_state.balance -= msg.amount;
+                if (msg.description[0] != '\0') {
+                    g_state.status = "-" + String(msg.amount) + " (" + String(msg.description) + ")";
+                } else {
+                    g_state.status = "-" + String(msg.amount) + " coins spent";
+                }
+                playSuccessTone();
+                Serial.printf("[OK] Spent %d coins\n", msg.amount);
+            }
+            break;
+
+        case MSG_RESET_ALL:
+            g_state.username = "Guest";
+            g_state.balance = 0;
+            g_state.authenticated = false;
+            g_state.status = "System reset";
+            playToneNonBlocking(500, 500);
+            Serial.println("[OK] System reset received");
+            break;
+
+        default:
+            shouldRedraw = false;
+            shouldPlaySound = false;
+            Serial.printf("[WARN] Unknown message type: %d\n", msg.type);
+            break;
+    }
+
+    if (shouldRedraw) {
+        drawUI();
     }
 }
 
-void handleCoin(AsyncWebServerRequest *request) {
-    if (request->hasParam("value", true)) {
-        ccoin += request->getParam("value", true)->value().toInt();
-        alertText = "Coin Get!";
-        needUpdate = true;
-        // M5.Speaker.tone(2000, 100); 
-        request->send(200, "text/plain", "OK");
-    } else {
-        request->send(400, "text/plain", "No Value");
+// ============================================
+// FREERTOS TASKS
+// ============================================
+
+// Task: Battery monitor - updates every 1 second
+void taskBatteryMonitor(void *parameter) {
+    TickType_t lastWakeTime = xTaskGetTickCount();
+    const TickType_t interval = pdMS_TO_TICKS(BATTERY_UPDATE_INTERVAL);
+
+    while (1) {
+        updateBatteryStatus();
+        vTaskDelayUntil(&lastWakeTime, interval);
     }
 }
 
+// Task: UI updater - refreshes display every 500ms
+void taskUIUpdate(void *parameter) {
+    TickType_t lastWakeTime = xTaskGetTickCount();
+    const TickType_t interval = pdMS_TO_TICKS(UI_UPDATE_INTERVAL);
+
+    while (1) {
+        drawUI();
+        vTaskDelayUntil(&lastWakeTime, interval);
+    }
+}
+
+// ============================================
+// SETUP
+// ============================================
 void setup() {
-    auto cfg = M5.config();
-    M5.begin(cfg);
-    
+    M5.begin();
+    M5.Lcd.setRotation(3);  // Landscape mode
     Serial.begin(115200);
-    Serial.println("--- BOOT START ---");
+    delay(500);
 
-    M5.Lcd.setRotation(3);
-    M5.Lcd.setTextSize(2); 
+    Serial.println("\n\n=== STATION 1: STICKC-PLUS2 STARTING ===");
 
-    // --- ส่วนที่แก้ไข: ตั้งค่าเป็น Access Point ---
-    Serial.print("Setting up AP...");
-    M5.Lcd.print("Creating WiFi...");
-    
-    WiFi.mode(WIFI_AP); // บังคับโหมด AP
-    WiFi.softAPConfig(local_IP, gateway, subnet); // ตั้งค่า IP
-    bool result = WiFi.softAP(SSID_AP, PASSWORD_AP); // เริ่มปล่อยสัญญาณ
-    
-    if(result) {
-        Serial.println("Ready");
-        M5.Lcd.println("Done");
-    } else {
-        Serial.println("Failed!");
-        M5.Lcd.println("Failed");
+    // Initialize display
+    M5.Lcd.fillScreen(TFT_BLACK);
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.drawString("Initializing...", 10, 60);
+
+    // Initialize WiFi (for ESP-NOW compatibility)
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false);
+    delay(100);
+
+    // Initialize ESP-NOW
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[ERROR] ESP-NOW initialization failed");
+        M5.Lcd.fillScreen(TFT_RED);
+        M5.Lcd.setTextColor(TFT_WHITE);
+        M5.Lcd.drawString("ESP-NOW Error!", 50, 60);
+        while (1) delay(1000);
     }
+    Serial.println("[OK] ESP-NOW initialized");
 
-    // อ่าน MAC Address ของฝั่ง AP
-    myMacAddress = WiFi.softAPmacAddress();
-    Serial.print("AP IP address: ");
-    Serial.println(WiFi.softAPIP());
-    Serial.println("MAC: " + myMacAddress);
+    // Register receive callback
+    esp_now_register_recv_cb(onDataRecv);
 
-    // เริ่ม Server
-    stickCServer.on("/set_username", HTTP_POST, handleUsername);
-    stickCServer.on("/add_coin", HTTP_POST, handleCoin);
-    
-    // จัดการ 404 Not Found (เผื่อคนเข้าผิดหน้า)
-    stickCServer.onNotFound([](AsyncWebServerRequest *request){
-        request->send(404, "text/plain", "Not found");
-    });
+    // Get initial battery status
+    updateBatteryStatus();
 
-    stickCServer.begin();
-    Serial.println("Server Started");
+    // Draw initial UI
+    drawUI();
 
-    updateDisplay();
+    // Create FreeRTOS tasks
+    xTaskCreatePinnedToCore(
+        taskBatteryMonitor,   // Function
+        "BatteryTask",        // Name
+        2048,                 // Stack size
+        NULL,                 // Parameter
+        1,                    // Priority
+        NULL,                 // Task handle
+        0                     // Core
+    );
+
+    xTaskCreatePinnedToCore(
+        taskUIUpdate,         // Function
+        "UITask",             // Name
+        2048,                 // Stack size
+        NULL,                 // Parameter
+        1,                    // Priority
+        NULL,                 // Task handle
+        1                     // Core (different from battery task)
+    );
+
+    Serial.println("[OK] FreeRTOS tasks created");
+    Serial.println("=== STATION 1 STICKC READY ===\n");
 }
 
+// ============================================
+// MAIN LOOP
+// ============================================
 void loop() {
+    // Update M5 state (handles button presses, etc.)
     M5.update();
-    if (needUpdate) {
-        Serial.println("Updating Display...");
-        updateDisplay();
-        needUpdate = false;
+
+    // Check for timeout (no messages for 30 seconds)
+    if (g_state.lastMessageTime > 0 && 
+        (millis() - g_state.lastMessageTime) > 30000) {
+        if (g_state.status != "No signal") {
+            g_state.status = "No signal (timeout)";
+            drawUI();
+        }
     }
-    // ไม่ต้องมี delay ใน loop นี้เพื่อให้ AsyncWebServer ทำงานได้เต็มที่
+
+    // Sleep to reduce power consumption
+    delay(100);
 }

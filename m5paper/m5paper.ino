@@ -130,7 +130,7 @@ void setup() {
   }
   Serial.println("\nConnected!");
 
-  paperServer.on("/menu", HTTP_GET, handleGetRequest); 
+  paperServer.on("/menu", HTTP_GET, handleGetRequest);  
 }
 
 void handleGetRequest(AsyncWebServerRequest *request) {

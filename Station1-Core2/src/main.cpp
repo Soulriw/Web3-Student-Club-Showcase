@@ -1,7 +1,7 @@
 // Station1_Core2_AP.cpp
 // Hardware: M5Stack Core2
 // Function: WiFi AP, DHCP, DNS, Captive Portal, User Registration
-// [Updated] Added setReuse(false) and increased delays to fix "Connection reset by peer"
+// [Updated] Added Enable/Disable mode to prevent dual AP collision
 
 #include <M5Core2.h>
 #include <WiFi.h>
@@ -20,6 +20,9 @@ Participant participant;
 
 const int QR_WIDTH = 180;
 const int QR_X = (320 - QR_WIDTH) / 2;
+
+// [Added] Device Enable/Disable State
+bool isStationActive = false;  // เริ่มต้นปิด ต้องกดเปิดก่อนใช้งาน
 
 // Flag เพื่อบอก loop() ว่าต้องส่งข้อมูล
 bool shouldSyncUser = false;
@@ -44,7 +47,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
     <div class="container">
-        <h1>🚀 Web3 Student Club</h1>
+        <h1>Web3 Student Club</h1>
         <p>Enter your unique username to generate your event identity.</p>
         
         <form action="/submit_identity" method="POST">
@@ -72,7 +75,7 @@ const char success_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
     <div class="card">
-        <h1>✅ Identity Created!</h1>
+        <h1>Identity Created!</h1>
         <p>Please check your Wearable.</p>
         <p>Proceed to Station 2.</p>
     </div>
@@ -161,6 +164,27 @@ void syncUserToStations() {
 void drawUI() {
     M5.Lcd.fillScreen(BLACK);
     
+    // [Added] Show Disabled State
+    if (!isStationActive) {
+        M5.Lcd.setTextDatum(MC_DATUM);
+        M5.Lcd.setTextColor(RED, BLACK);
+        M5.Lcd.setTextFont(4);
+        M5.Lcd.drawString("Station 1: DISABLED", 160, 80);
+        
+        M5.Lcd.setTextColor(YELLOW, BLACK);
+        M5.Lcd.setTextFont(2);
+        M5.Lcd.drawString("Press BUTTON A to ENABLE", 160, 120);
+        M5.Lcd.drawString("(Only enable ONE Station1)", 160, 140);
+        
+        // Bottom Button Labels
+        M5.Lcd.fillRect(0, 200, 320, 40, DARKGREY);
+        M5.Lcd.setTextColor(WHITE, DARKGREY);
+        M5.Lcd.drawString("ENABLE", 53, 220);
+        
+        return;
+    }
+    
+    // [Existing] Normal Operation UI
     if (participant.Username == "") {
         M5.Lcd.setTextDatum(TC_DATUM);
         M5.Lcd.setTextColor(WHITE, BLACK);
@@ -172,6 +196,12 @@ void drawUI() {
         
         M5.Lcd.setTextFont(2);
         M5.Lcd.drawString("Connect WiFi & Create ID", 160, 210);
+        
+        // Bottom Button
+        M5.Lcd.fillRect(0, 200, 107, 40, DARKGREY);
+        M5.Lcd.setTextColor(RED, DARKGREY);
+        M5.Lcd.drawString("DISABLE", 53, 220);
+        
     } else {
         M5.Lcd.setTextDatum(MC_DATUM);
         M5.Lcd.setTextColor(GREEN, BLACK);
@@ -183,6 +213,11 @@ void drawUI() {
         
         M5.Lcd.setTextFont(2);
         M5.Lcd.drawString("Proceed to Station 2", 160, 180);
+        
+        // Bottom Button
+        M5.Lcd.fillRect(0, 200, 107, 40, DARKGREY);
+        M5.Lcd.setTextColor(RED, DARKGREY);
+        M5.Lcd.drawString("DISABLE", 53, 220);
     }
 }
 
@@ -230,37 +265,79 @@ void setupWebHandlers() {
 }
 
 void setup() {
-    M5.begin(true, false, true, true); 
+    M5.begin(true, false, true, true);
     
-    WiFi.mode(WIFI_AP);
-    
-    esp_wifi_stop();
-    esp_wifi_deinit();
-    
-    wifi_init_config_t conf = WIFI_INIT_CONFIG_DEFAULT();
-    conf.ampdu_rx_enable = false; 
-    esp_wifi_init(&conf);
-    esp_wifi_start();
-    
-    delay(100);
-
-    WiFi.softAPConfig(IP_STATION1_AP, IP_STATION1_AP, NETMASK);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    
-    dnsServer.start(53, "*", IP_STATION1_AP);
-    
-    setupWebHandlers();
-    server.begin();
+    Serial.begin(115200);
+    Serial.println("\n\n=== Station 1 Core2 AP ===");
+    Serial.println("Device is DISABLED by default");
+    Serial.println("Press Button A to ENABLE this Station");
     
     drawUI();
 }
 
 void loop() {
     M5.update();
-    dnsServer.processNextRequest();
+    
+    // [Added] Button A: Enable/Disable Station
+    if (M5.BtnA.wasPressed()) {
+        if (!isStationActive) {
+            // Enable Station
+            Serial.println("\n>>> ENABLING STATION 1 <<<");
+            
+            WiFi.mode(WIFI_AP);
+            WiFi.softAPConfig(IP_STATION1_AP, IP_STATION1_AP, NETMASK);
+            
+            bool apStarted = WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4);
+            
+            if (apStarted) {
+                Serial.println("✓ AP Started Successfully");
+                Serial.printf("  SSID: %s\n", AP_SSID);
+                Serial.printf("  IP: %s\n", WiFi.softAPIP().toString().c_str());
+                Serial.printf("  Channel: 1\n");
+                
+                dnsServer.start(53, "*", IP_STATION1_AP);
+                Serial.println("✓ DNS Server Started");
+                
+                setupWebHandlers();
+                server.begin();
+                Serial.println("✓ Web Server Started");
+                Serial.println("=== System Ready ===\n");
+                
+                isStationActive = true;
+            } else {
+                Serial.println("✗ AP Failed to Start!");
+                M5.Lcd.fillScreen(RED);
+                M5.Lcd.setTextColor(WHITE);
+                M5.Lcd.setTextDatum(MC_DATUM);
+                M5.Lcd.drawString("AP START FAILED!", 160, 120);
+                return;
+            }
+            
+        } else {
+            // Disable Station
+            Serial.println("\n>>> DISABLING STATION 1 <<<");
+            
+            server.end();
+            dnsServer.stop();
+            WiFi.softAPdisconnect(true);
+            WiFi.mode(WIFI_OFF);
+            
+            participant.reset();
+            isStationActive = false;
+            
+            Serial.println("✓ Station Disabled\n");
+        }
+        
+        drawUI();
+    }
+    
+    // [Modified] Only process if station is active
+    if (isStationActive) {
+        dnsServer.processNextRequest();
 
-    if (shouldSyncUser) {
-        syncUserToStations();
-        shouldSyncUser = false;
+        if (shouldSyncUser) {
+            syncUserToStations();
+            shouldSyncUser = false;
+        }
     }
 }

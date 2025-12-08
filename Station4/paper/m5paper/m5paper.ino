@@ -6,10 +6,6 @@
 #include <esp_now.h>
 #include "config.h"
 
-const char *SSID_AP = "Web3Showcase_AP";
-const char *PASSWORD_AP = NULL;
-const int LOCAL_PORT = 88; 
-
 uint8_t atomMAC[] = {0x4C, 0x75, 0x25, 0xAC, 0xBE, 0x18};
 
 typedef struct struct_message {
@@ -21,9 +17,11 @@ struct_message outgoing;
 M5EPD_Canvas canvas(&M5.EPD);
 M5EPD_Canvas status_canvas(&M5.EPD); 
 
-AsyncWebServer paperServer(LOCAL_PORT);
+AsyncWebServer paperServer(80);
 
 int selectedChoice = 0;
+
+bool submitted = false;
 
 void onDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   // --- TRIGGER EVENT ON M5PAPER ---
@@ -44,7 +42,6 @@ void drawMenu() {
   canvas.drawString("CAMT WEB3 CAFE", 100, 50);
 
   canvas.setTextSize(3);
-
   canvas.drawRect(0, 130, 540, 80, 15);
   canvas.drawString("1. Coffee......2 CCoin", 30, 155);
   defaultSelectButton(1);
@@ -97,6 +94,25 @@ void sumbitStatus(String msg1, String msg2) {
   Serial.println("Submitted");
 }
 
+void handleSystemReset(AsyncWebServerRequest *request) {
+  drawMenu();
+  updateStatus("");
+  submitted = false;
+  selectedChoice = 0;
+  request->send(200, "text/plain", "M5-Paper S4 reset complete.");
+}
+
+void handleGetRequest(AsyncWebServerRequest *request) {
+  String receivedUsername = "";
+  if (request->hasParam("value", true)) { // POST
+    
+  } else if (request->hasParam("value", false)) { // GET
+
+  } else {
+    request->send(400, "text/plain", "Missing Parameter.");
+  }
+}
+
 void setup() {
   M5.begin();
     
@@ -130,19 +146,8 @@ void setup() {
   peerInfo.encrypt = false;
   esp_now_add_peer(&peerInfo);
 
-  paperServer.on("/menu", HTTP_GET, handleGetRequest);
+  paperServer.on(ENDPOINT_GET_ORDER, HTTP_GET, handleGetRequest);
   paperServer.begin();
-}
-
-void handleGetRequest(AsyncWebServerRequest *request) {
-  String receivedUsername = "";
-  if (request->hasParam("value", true)) { // POST
-    
-  } else if (request->hasParam("value", false)) { // GET
-
-  } else {
-    request->send(400, "text/plain", "Missing Parameter.");
-  }
 }
 
 void loop() {
@@ -154,42 +159,44 @@ void loop() {
       int x = M5.TP.readFingerX(0);
       int y = M5.TP.readFingerY(0);
 
-      if (selectedChoice != 1 && x >= 130 && x <= 229) {
-        if (selectedChoice > 0) {
-          defaultSelectButton(selectedChoice);
+      if (!submitted) {
+
+        if (selectedChoice != 1 && x >= 130 && x <= 229) {
+          if (selectedChoice > 0) {
+            defaultSelectButton(selectedChoice);
+          }
+          selectedChoice = 1;
+          selectButton(selectedChoice);
+          canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
         }
-        selectedChoice = 1;
-        selectButton(selectedChoice);
-        canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
-      }
-      else if (selectedChoice != 2 && x >= 230 && x <= 329) {
-        if (selectedChoice > 0) {
-          defaultSelectButton(selectedChoice);
+        else if (selectedChoice != 2 && x >= 230 && x <= 329) {
+          if (selectedChoice > 0) {
+            defaultSelectButton(selectedChoice);
+          }
+          selectedChoice = 2;
+          selectButton(selectedChoice);
+          canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
         }
-        selectedChoice = 2;
-        selectButton(selectedChoice);
-        canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
-      }
-      else if (selectedChoice != 3 && x >= 330 && x <= 410) {
-        if (selectedChoice > 0) {
-          defaultSelectButton(selectedChoice);
+        else if (selectedChoice != 3 && x >= 330 && x <= 410) {
+          if (selectedChoice > 0) {
+            defaultSelectButton(selectedChoice);
+          }
+          selectedChoice = 3;
+          selectButton(selectedChoice);
+          canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
         }
-        selectedChoice = 3;
-        selectButton(selectedChoice);
-        canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
-      }
-      else if (selectedChoice != 4 && x >= 430 && x <= 510) {
-        if (selectedChoice > 0) {
-          defaultSelectButton(selectedChoice);
+        else if (selectedChoice != 4 && x >= 430 && x <= 510) {
+          if (selectedChoice > 0) {
+            defaultSelectButton(selectedChoice);
+          }
+          selectedChoice = 4;
+          selectButton(selectedChoice);
+          canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
         }
-        selectedChoice = 4;
-        selectButton(selectedChoice);
-        canvas.pushCanvas(0, 0, UPDATE_MODE_DU4);
+
       }
 
       delay(100);
-      x = 0;
-      y = 0;
     }
   }
 }

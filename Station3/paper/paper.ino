@@ -26,6 +26,7 @@ Activity activities[] = {
 };
 
 void drawMenu() {
+
     canvas.createCanvas(540, 960); 
     
     // Header
@@ -97,9 +98,24 @@ void handleSystemReset(AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "M5-Paper S3 reset complete.");
 }
 
+void pingStickC() {
+    WiFiClient client;
+    Serial.print("Pinging StickC (");
+    Serial.print(IP_STICKC);
+    Serial.print(":80)... ");
+    
+    if (client.connect(IP_STICKC, 80)) {
+        Serial.println("OK");
+        client.stop();
+    } else {
+        Serial.println("Failed");
+    }
+}
+
 bool sendReceiveCoin(String coin_value) {
     HTTPClient http;
-    String url = "http://" + IP_STICKC.toString() + ":88/" + ENDPOINT_EARN_COIN;
+    String url = "http://" + IP_STICKC.toString() + "/" + ENDPOINT_EARN_COIN;
+    Serial.println("Sending " + coin_value + " to " + url);
     http.begin(url);
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
@@ -132,6 +148,9 @@ void setup() {
     }
     Serial.print("\nConnected to AP. IP: ");
     Serial.println(WiFi.localIP());
+
+    // Check connection to StickC
+    pingStickC();
 
     // ตั้งค่า Server Endpoints
     server.on(ENDPOINT_RESET_GLOBAL, HTTP_POST, handleSystemReset);
@@ -202,7 +221,7 @@ void loop() {
                     }
                 }
             }
-            delay(50);
+            delay(100);
         }
     }
 }

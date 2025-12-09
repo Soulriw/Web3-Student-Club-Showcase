@@ -150,6 +150,9 @@ void setup() {
   esp_now_add_peer(&peerInfo);
 
   paperServer.on(ENDPOINT_GET_ORDER, HTTP_GET, handleGetRequest);
+  paperServer.on(ENDPOINT_HEARTBEAT, HTTP_GET, [] (AsyncWebServerRequest *r) {
+        r->send(200, "text/plain", "OK");
+    });
   paperServer.begin();
 }
 

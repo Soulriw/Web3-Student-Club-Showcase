@@ -154,6 +154,9 @@ void setup() {
 
     // ตั้งค่า Server Endpoints
     server.on(ENDPOINT_RESET_GLOBAL, HTTP_POST, handleSystemReset);
+    server.on(ENDPOINT_HEARTBEAT, HTTP_GET, [] (AsyncWebServerRequest *r) {
+        r->send(200, "text/plain", "OK");
+    });
 
     server.begin();
 

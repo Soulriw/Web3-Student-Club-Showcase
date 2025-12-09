@@ -27,11 +27,16 @@ IPAddress NETMASK(255, 255, 255, 0);
 #define ENDPOINT_SET_AUTH "/set_auth"
 #define ENDPOINT_RESET_GLOBAL "/reset_global"
 
-// [เพิ่มเติม] เพิ่ม Endpoints สำหรับ Earn และ Spend ที่หายไป
+// Earn และ Spend
 #define ENDPOINT_EARN_COIN "/earn_coin"
 #define ENDPOINT_SPEND_COIN "/spend_coin"
 
-// [เพิ่มเติม] Endpoints สำหรับ Atom Matrix (เผื่อใช้)
+// Station 4 Order System
 #define ENDPOINT_GET_ORDER "/get_order"
+#define ENDPOINT_SEND_ORDER "/send_order"
+
+// Audio Endpoints
+#define ENDPOINT_PLAY_AUTH "/play_auth"
+#define ENDPOINT_PLAY_TX "/play_tx"
 
 #endif // CONFIG_H

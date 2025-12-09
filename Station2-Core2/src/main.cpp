@@ -1,81 +1,111 @@
-// Station2_Core2_Monitor.cpp
-// Hardware: M5Stack Core2 (Second Unit)
-// Function: Display Authentication Status
-
 #include <M5Core2.h>
 #include <WiFi.h>
-#include <ESPAsyncWebServer.h>
-#include "config.h"
-#include "Participant.h"
+#include <esp_now.h>
 
-AsyncWebServer server(80);
-Participant participant;
+// --- ส่วนประกาศตัวแปรและโครงสร้างข้อมูล ---
+typedef struct struct_message {
+  char type[10];     
+  char username[50];  
+  int status;
+} struct_message;
 
-void drawMonitor() {
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setTextDatum(TC_DATUM);
-    M5.Lcd.setTextColor(WHITE, BLACK);
-    M5.Lcd.setFont(&fonts::Font4);
-    M5.Lcd.drawString("Station 2: Authentication", 160, 10);
-    
-    M5.Lcd.setTextDatum(MC_DATUM);
-    if (participant.Username == "") {
-        M5.Lcd.setTextColor(DARKGREY, BLACK);
-        M5.Lcd.drawString("Waiting for User...", 160, 120);
-    } else {
-        M5.Lcd.setFont(&fonts::lgfxThai_24);
-        M5.Lcd.setTextColor(CYAN, BLACK);
-        M5.Lcd.drawString("Verifying: " + participant.Username, 160, 90);
-        
-        if (participant.isAuthenticated) {
-            M5.Lcd.setTextColor(GREEN, BLACK);
-            M5.Lcd.drawString("☑ AUTH SUCCESS", 160, 140);
-        } else {
-            M5.Lcd.setTextColor(YELLOW, BLACK);
-            M5.Lcd.drawString("... In Progress ...", 160, 140);
-        }
-    }
+struct_message incomingReadings;
+
+volatile bool new_data_received = false; 
+volatile bool reset_triggered = false;   
+
+String display_username = "";
+
+// --- ส่วนแสดงผลหน้าจอ ---
+void displayResetScreen() {
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setTextColor(WHITE, BLACK);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  
+  M5.Lcd.drawString("SYSTEM STATUS:", 160, 100);
+  M5.Lcd.setTextColor(CYAN, BLACK);
+  M5.Lcd.drawString("Waiting for Request...", 160, 140);
 }
 
+void displayAuthSuccess(String username) {
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setTextColor(WHITE, BLACK);
+  M5.Lcd.setTextSize(3);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.drawString("Verifying...", 160, 120);
+  
+  delay(500); 
+
+  M5.Lcd.fillScreen(GREEN);
+  M5.Lcd.setTextColor(BLACK, GREEN);
+  M5.Lcd.setTextSize(2);
+  
+  String verifyText = "Verifying (" + username + ")";
+  M5.Lcd.drawString(verifyText, 160, 90);
+  
+  M5.Lcd.setTextSize(3);
+  M5.Lcd.drawString("Authentication", 160, 140);
+  M5.Lcd.drawString("Successful", 160, 180);
+  
+  // Graphic
+  M5.Lcd.drawCircle(160, 50, 20, BLACK);
+  M5.Lcd.drawLine(150, 50, 160, 60, BLACK);
+  M5.Lcd.drawLine(160, 60, 175, 40, BLACK);
+}
+
+// --- ส่วนรับข้อมูล ESP-NOW ---
+void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) {
+  memcpy(&incomingReadings, incomingData, sizeof(incomingReadings));
+  
+  // กรณีได้รับคำสั่ง AUTH (ยืนยันตัวตน)
+  if (strcmp(incomingReadings.type, "AUTH") == 0 && incomingReadings.status == 1) {
+    display_username = String(incomingReadings.username);
+    new_data_received = true;
+    Serial.println("Command: AUTH RECEIVED");
+  }
+  
+  // กรณีได้รับคำสั่ง RESET (รีเซ็ตระบบ)
+  else if (strcmp(incomingReadings.type, "RESET") == 0) {
+    reset_triggered = true;
+    Serial.println("Command: RESET RECEIVED");
+  }
+}
+
+// --- Setup ---
 void setup() {
-    M5.begin();
-    WiFi.begin(AP_SSID, AP_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED) delay(500);
-    
-    // IP Config
-    WiFi.config(IP_STATION2_MON, IP_STATION1_AP, NETMASK, IP_STATION1_AP);
+  M5.begin();
+  Serial.begin(115200);
 
-    // Handlers
-    server.on(ENDPOINT_SET_USER, HTTP_POST, [](AsyncWebServerRequest *request){
-        if (request->hasParam("username", true)) {
-            participant.Username = request->getParam("username", true)->value();
-            participant.isAuthenticated = false;
-            drawMonitor();
-            request->send(200);
-        } else request->send(400);
-    });
+  displayResetScreen();
 
-    server.on(ENDPOINT_SET_AUTH, HTTP_POST, [](AsyncWebServerRequest *request){
-        participant.isAuthenticated = true;
-        drawMonitor();
-        request->send(200);
-    });
+  WiFi.mode(WIFI_STA);
 
-    server.on(ENDPOINT_RESET_GLOBAL, HTTP_POST, [](AsyncWebServerRequest *request){
-        participant.reset();
-        drawMonitor();
-        request->send(200);
-    });
-    
-    // Heartbeat Endpoint
-    server.on(ENDPOINT_HEARTBEAT, HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(200, "text/plain", "OK");
-    });
-
-    server.begin();
-    drawMonitor();
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  
+  // ลงทะเบียนฟังก์ชันรับข้อมูล (ส่วนที่ขาดไปก่อนหน้านี้)
+  esp_now_register_recv_cb(OnDataRecv);
+  Serial.println("Station 2 Ready...");
 }
 
+// --- Loop (ส่วนที่ขาดไปก่อนหน้านี้) ---
 void loop() {
-    M5.update();
+  
+  // 1. เช็คคำสั่ง RESET ก่อน (สำคัญสุด)
+  if (reset_triggered) {
+    displayResetScreen(); 
+    reset_triggered = false; 
+    new_data_received = false; 
+  }
+
+  // 2. เช็คคำสั่ง AUTH
+  if (new_data_received) {
+    displayAuthSuccess(display_username);
+    new_data_received = false;
+  }
+  
+  M5.update();
 }

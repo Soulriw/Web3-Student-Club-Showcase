@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "author": "Showcase Project",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-m5stack-core2",
+      "id": "core2",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    }
+  ],
+  "connections": [],
+  "dependencies": {}
+}

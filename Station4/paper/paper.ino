@@ -93,7 +93,7 @@ void handleSystemReset(AsyncWebServerRequest *request) {
     String msg = String(-1);
     sendCommand(msg.c_str());
     Serial.println("Received reset signal from Core");
-    request->send(200, "text/plain", "M5-Paper S3 reset complete.");
+    request->send(200, "text/plain", "M5-Paper S4 reset complete.");
     ESP.restart();
 }
 

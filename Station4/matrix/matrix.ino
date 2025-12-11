@@ -5,17 +5,22 @@
 
 //ใส่ MAC Address
 uint8_t paperAddress[]  = {0x08, 0xF9, 0xE0, 0xF6, 0x23, 0x58}; // M5Paper
-uint8_t stickcAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // StickC Plus2
+uint8_t stickc1Address[]  = {0x00, 0x4B, 0x12, 0xC4, 0x2D, 0xF8};
+uint8_t stickc2Address[]  = {0x00, 0x4b, 0x12, 0xC4, 0x35, 0x48};
 uint8_t echoAddress[]   = {0x90, 0x15, 0x06, 0xFA, 0xE7, 0x70}; // Echo
-
-bool massSend = false;
 
 int standbyIcon[] = { 0, 1, 2, 3, 4, 5, 9, 10, 12, 14, 15, 19, 20, 21, 22, 23, 24 };
 
 // ไอคอนติ๊กถูก
 int checkIcon[] = { 15, 21, 17, 13, 9 };
 
-bool continueSend = false;
+bool sending = false;
+
+typedef struct struct_message {
+  char msg[32];
+} struct_message;
+
+struct_message outgoing;
 
 void showStandbyPattern() {
     M5.dis.clear();
@@ -30,6 +35,11 @@ void showSuccessPattern() {
 void showProcessingPattern() {
     M5.dis.clear();
     M5.dis.fillpix(0xFFFF00); //สีเหลืองทั้งจอ คือ กำลังส่ง
+}
+
+void showFailedPattern() {
+    M5.dis.clear();
+    M5.dis.fillpix(0xFF0000); //สีแดงทั้งจอ คือ ไม่ส่งได้
 }
 
 void addPeer(uint8_t *macAddr) {
@@ -50,27 +60,33 @@ void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incomingData, i
     // 51 = 3rd choice
     // 51 = 4th choice
 
-    if (!massSend) return; // stop doing stuff when it's done or not being started
-    Serial.println(incomingData[0]);
+    Serial.print("Recieved: ");
+    Serial.print(incomingData[0]);
+    Serial.println();
+
+    if (incomingData[0] == 48) {
+        showFailedPattern();
+        delay(2000);
+        showStandbyPattern();
+        sending = false;
+        return;
+    } else if (incomingData[0] == 45) {
+        Serial.println("Received reset trigger from Core");
+        String msg = String(-1);
+        strcpy(outgoing.msg, msg.c_str());
+        esp_now_send(echoAddress, (uint8_t *)&outgoing, sizeof(outgoing));
+        ESP.restart();
+    }
 
     // send data to stick c and handle coin moderation
-    esp_now_send(stickcAddress, &incomingData[0], sizeof(incomingData[0]));
-    uint8_t triggerSignal = 1 ;
-    esp_now_send(echoAddress, &triggerSignal, sizeof(triggerSignal));
+    esp_now_send(echoAddress, &incomingData[0], sizeof(&incomingData[0]));
+    esp_now_send(stickc1Address, &incomingData[0], sizeof(incomingData[0]));
+    esp_now_send(stickc2Address, &incomingData[0], sizeof(incomingData[0]));
 
     showSuccessPattern();
     delay(2000); //โชว์ค้างไว้ 2 วินาที
     showStandbyPattern(); //กลับไปเป็นสีน้ำเงิน
-    massSend = false; // stop mass sending because it's successfully sent and got feedback
-} 
-
-void massSendUntilReceive() {
-    massSend = true;
-    while (massSend) {
-        //ส่ง Requestไปหา Paper  ตอนนี้ส่งแค่สัญญาณเปล่าๆ
-        uint8_t requestSignal = 1 ;
-        esp_now_send(paperAddress, &requestSignal, sizeof(requestSignal));
-    }
+    sending = false;
 }
 
 void setup() {
@@ -82,7 +98,8 @@ void setup() {
     if (esp_now_init() != ESP_OK) return;
     
     addPeer(paperAddress);
-    addPeer(stickcAddress);
+    addPeer(stickc1Address);
+    addPeer(stickc2Address);
     addPeer(echoAddress);
 
     esp_now_register_recv_cb(OnDataRecv);
@@ -93,14 +110,18 @@ void setup() {
 
 void loop() {
     M5.update();
-
-    if (M5.Btn.wasPressed()) {
+    if (!sending && M5.Btn.wasPressed()) {
         
         //แสดงสีเหลือง ส่งข้อมูลไปถาม Paper
         showProcessingPattern();
 
+        sending = true;
+    } else if (sending) {
         Serial.println("Sent Request to Paper...");
-
-        massSendUntilReceive();
+        uint8_t requestSignal = 1 ;
+        esp_now_send(paperAddress, &requestSignal, sizeof(requestSignal));
+        delay(2000);
     }
+
+    delay(100);
 }

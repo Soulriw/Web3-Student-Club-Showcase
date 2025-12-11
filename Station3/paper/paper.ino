@@ -91,12 +91,9 @@ void defaultSelectButton(int choice) {
 }
 
 void handleSystemReset(AsyncWebServerRequest *request) {
-    drawMenu();
-    updateStatus("");
-    submitted = false;
-    selectedChoice = 0;
     Serial.println("Received reset signal from Core");
     request->send(200, "text/plain", "M5-Paper S3 reset complete.");
+    ESP.restart();
 }
 
 void pingStickC() {

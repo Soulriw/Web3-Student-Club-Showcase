@@ -5,7 +5,7 @@
 
 // --- SoftAP Configuration (Hosted by Station 1) ---
 const char* AP_SSID = "Web3_Showcase_AP";
-const char* AP_PASSWORD = NULL; // Open network for easy Captive Portal
+const char* AP_PASSWORD = "12345678"; // Open network for easy Captive Portal
 
 // --- IP Address Mapping ---
 // Gateway (Station 1) must be x.x.x.1

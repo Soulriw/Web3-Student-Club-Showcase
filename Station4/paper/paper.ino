@@ -11,6 +11,9 @@ M5EPD_Canvas canvas(&M5.EPD);
 M5EPD_Canvas status_canvas(&M5.EPD); 
 
 uint8_t atomMAC[] = {0x4C, 0x75, 0x25, 0xAC, 0xBE, 0x18};
+uint8_t stickc1MAC[]  = {0x00, 0x4B, 0x12, 0xC4, 0x2D, 0xF8};
+uint8_t stickc2MAC[]  = {0x00, 0x4b, 0x12, 0xC4, 0x35, 0x48};
+uint8_t echoMAC[]   = {0x90, 0x15, 0x06, 0xFA, 0xE7, 0x70};
 
 typedef struct struct_message {
   char msg[32];
@@ -33,19 +36,10 @@ Activity activities[] = {
     {"Tea..........2 CCoin"}
 };
 
-// Receive trigger action from atom matrix
-void onDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-  // --- TRIGGER EVENT ON M5PAPER ---
-  Serial.println("receive from matrix");
-
-  String msg = String(selectedChoice);
-  sendCommand(msg.c_str());
-}
-
 // Send number of order to atom matrix
-void sendCommand(const char *cmd) {
+void sendCommand(uint8_t *macAddr, const char *cmd) {
   strcpy(outgoing.msg, cmd);
-  esp_now_send(atomMAC, (uint8_t *)&outgoing, sizeof(outgoing));
+  esp_now_send(macAddr, (uint8_t *)&outgoing, sizeof(outgoing));
   Serial.print("Sent: ");
   Serial.println(cmd);
 }
@@ -91,7 +85,8 @@ void defaultSelectButton(int choice) {
 
 void handleSystemReset(AsyncWebServerRequest *request) {
     String msg = String(-1);
-    sendCommand(msg.c_str());
+    sendCommand(atomMAC, msg.c_str());
+    sendCommand(echoMAC, msg.c_str());
     Serial.println("Received reset signal from Core");
     request->send(200, "text/plain", "M5-Paper S4 reset complete.");
     ESP.restart();
@@ -101,7 +96,7 @@ void addPeer(uint8_t *macAddr) {
     esp_now_peer_info_t peerInfo;
     memset(&peerInfo, 0, sizeof(peerInfo));
     memcpy(peerInfo.peer_addr, macAddr, 6);
-    peerInfo.channel = 1;
+    peerInfo.channel = WiFi.channel();
     peerInfo.encrypt = false;
     esp_now_add_peer(&peerInfo);
 }
@@ -130,12 +125,37 @@ void setup() {
         Serial.println("Error initializing ESP-NOW");
         return;
     }
-    esp_now_register_recv_cb(onDataRecv);
 
     addPeer(atomMAC);
+    addPeer(stickc1MAC);
+    addPeer(stickc2MAC);
+    addPeer(echoMAC);
 
     // ตั้งค่า Server Endpoints
     server.on(ENDPOINT_RESET_GLOBAL, HTTP_POST, handleSystemReset);
+    server.on(ENDPOINT_GET_ORDER, HTTP_GET, [] (AsyncWebServerRequest *r) {
+        if (selectedChoice == 0) {
+            r->send(201, "text/plain", "Choice not selected");
+            return;
+        }
+        String msg = "";
+        if (selectedChoice == 0) {
+            msg = "48";
+        } else if (selectedChoice == 1) {
+            msg = "49";
+        } else if (selectedChoice == 2) {
+            msg = "50";
+        } else if (selectedChoice == 3) {
+            msg = "51";
+        } else if (selectedChoice == 4) {
+            msg = "52";
+        }
+        sendCommand(echoMAC, msg.c_str());
+        sendCommand(stickc1MAC, msg.c_str());
+        sendCommand(stickc2MAC, msg.c_str());
+
+        r->send(200, "text/plain", "OK");
+    });
     server.on(ENDPOINT_HEARTBEAT, HTTP_GET, [] (AsyncWebServerRequest *r) {
         r->send(200, "text/plain", "OK");
     });

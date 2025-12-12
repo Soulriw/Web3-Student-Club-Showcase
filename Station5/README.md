@@ -1,1 +1,1 @@
-reset all station
+Reset all stations.
